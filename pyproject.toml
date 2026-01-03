@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "trackviz"
+version = "0.1.1"
+description = "Scrubbable video viewer for object detection/tracking predictions."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{name="Mehmet Keles and AI"}]
+dependencies = [
+  "numpy>=1.23",
+  "opencv-python>=4.8",
+  "PySide6>=6.5",
+]
+
+[project.scripts]
+trackviz = "trackviz.cli.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["trackviz"]
