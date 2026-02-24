@@ -85,7 +85,12 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         # --- UI ---
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
-        v = QtWidgets.QVBoxLayout(central)
+        main_h_layout = QtWidgets.QHBoxLayout(central)
+        
+        # Left Side: Video and Controls
+        left_panel = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(left_panel)
+        main_h_layout.addWidget(left_panel, stretch=3)
 
         self.image_label = QtWidgets.QLabel()
         self.image_label.setAlignment(QtCore.Qt.AlignCenter)
@@ -95,13 +100,11 @@ class TrackVizWindow(QtWidgets.QMainWindow):
 
         controls = QtWidgets.QHBoxLayout()
 
-        self.btn_play = QtWidgets.QPushButton("Play")
-        self.btn_pause = QtWidgets.QPushButton("Pause")
+        self.btn_toggle_play = QtWidgets.QPushButton("Play")
         self.btn_prev = QtWidgets.QPushButton("◀")
         self.btn_next = QtWidgets.QPushButton("▶")
         controls.addWidget(self.btn_prev)
-        controls.addWidget(self.btn_play)
-        controls.addWidget(self.btn_pause)
+        controls.addWidget(self.btn_toggle_play)
         controls.addWidget(self.btn_next)
 
         self.slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
@@ -113,6 +116,16 @@ class TrackVizWindow(QtWidgets.QMainWindow):
 
         self.lbl_frame = QtWidgets.QLabel("0")
         controls.addWidget(self.lbl_frame)
+        
+        # --- Jump to Frame ---
+        self.jump_box = QtWidgets.QSpinBox()
+        self.jump_box.setRange(0, 0)
+        self.jump_box.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        self.jump_box.setFixedWidth(80)
+        self.jump_btn = QtWidgets.QPushButton("Jump")
+        controls.addWidget(self.jump_box)
+        controls.addWidget(self.jump_btn)
+        
         v.addLayout(controls)
 
         self.chk_overlay = QtWidgets.QCheckBox("Overlay")
@@ -123,20 +136,54 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.chk_heatmap.setChecked(False)
         v.addWidget(self.chk_heatmap)
 
+        # --- Labeling UI ---
+        label_layout = QtWidgets.QHBoxLayout()
+        self.combo_classes = QtWidgets.QComboBox()
+        self.behavior_names = [
+            "0: ProbPumping", "1: Moving", "2: Grooming", 
+            "3: Feeding", "4: Quiescent", "5: HaltereSwitch", "6: Twitching"
+        ]
+        self.combo_classes.addItems(self.behavior_names)
+        self.btn_label = QtWidgets.QPushButton("Label Frame")
+        self.lbl_saved_info = QtWidgets.QLabel("No annotations")
+        label_layout.addWidget(QtWidgets.QLabel("Behavior:"))
+        label_layout.addWidget(self.combo_classes)
+        label_layout.addWidget(self.btn_label)
+        label_layout.addWidget(self.lbl_saved_info, stretch=1)
+        v.addLayout(label_layout)
+
+        # Right Side: Annotation Sidebar
+        right_panel = QtWidgets.QWidget()
+        right_panel.setFixedWidth(250)
+        v_right = QtWidgets.QVBoxLayout(right_panel)
+        main_h_layout.addWidget(right_panel)
+
+        v_right.addWidget(QtWidgets.QLabel("Annotations:"))
+        self.list_annotations = QtWidgets.QListWidget()
+        v_right.addWidget(self.list_annotations)
+        
+        self.btn_delete_anno = QtWidgets.QPushButton("Delete Selected")
+        v_right.addWidget(self.btn_delete_anno)
+
         # --- state ---
         self._playing = False
         self._current_frame = 0
+        self._annotations = {}  # frame_idx -> class_idx
+        self._annotation_path: Optional[Path] = None
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._on_tick)
 
         # --- signals ---
-        self.btn_play.clicked.connect(self.play)
-        self.btn_pause.clicked.connect(self.pause)
+        self.btn_toggle_play.clicked.connect(self.toggle_play)
         self.btn_prev.clicked.connect(lambda: self.step(-1))
         self.btn_next.clicked.connect(lambda: self.step(+1))
         self.slider.valueChanged.connect(self.set_frame)
         self.chk_overlay.stateChanged.connect(lambda: self.set_frame(self._current_frame))
         self.chk_heatmap.stateChanged.connect(lambda: self.set_frame(self._current_frame))
+        self.jump_btn.clicked.connect(lambda: self.set_frame(self.jump_box.value()))
+        self.btn_label.clicked.connect(self._save_annotation)
+        self.btn_delete_anno.clicked.connect(self._delete_annotation)
+        self.list_annotations.itemClicked.connect(self._on_anno_clicked)
 
         # init: show blank until a video is loaded
         self._show_blank()
@@ -144,6 +191,12 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             self.load_video_and_predictions(video_path, preds)
             if not self.cfg.start_paused:
                 self.play()
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if event.key() == QtCore.Qt.Key_Space:
+            self.toggle_play()
+        else:
+            super().keyPressEvent(event)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         if self.video is not None:
@@ -194,6 +247,11 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.preds = preds
         self.playback_fps = self.cfg.playback_fps or self.video.fps
 
+        # Handle annotations
+        v_path = Path(video_path)
+        self._annotation_path = v_path.parent / f"{v_path.stem}_annotations.json"
+        self._load_annotations()
+
         self.max_frames = min(self.video.frame_count or self.preds.total_frames, self.preds.total_frames)
         if self.max_frames <= 0:
             self.max_frames = self.preds.total_frames
@@ -202,6 +260,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.slider.setMaximum(max(0, self.max_frames - 1))
         self.slider.setValue(0)
         self.slider.blockSignals(False)
+        self.jump_box.setMaximum(max(0, self.max_frames - 1))
         self.set_frame(0)
 
     def load_from_video_path(self, video_path: Path) -> None:
@@ -213,6 +272,10 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.playback_fps = self.cfg.playback_fps or self.video.fps
 
         preds = self._autoload_predictions_for_video(video_path)
+
+        # Handle annotations
+        self._annotation_path = video_path.parent / f"{video_path.stem}_annotations.json"
+        self._load_annotations()
 
         # Finish wiring up state/UI
         self.preds = preds
@@ -229,7 +292,86 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.slider.setMaximum(max(0, self.max_frames - 1))
         self.slider.setValue(0)
         self.slider.blockSignals(False)
+        self.jump_box.setMaximum(max(0, self.max_frames - 1))
         self.set_frame(0)
+
+    def _save_annotation(self) -> None:
+        if self._annotation_path is None:
+            return
+            
+        cls_idx = self.combo_classes.currentIndex()
+        self._annotations[str(self._current_frame)] = cls_idx
+        
+        import json
+        with open(self._annotation_path, "w") as f:
+            json.dump(self._annotations, f, indent=2)
+            
+        self._update_annotation_label()
+
+    def _load_annotations(self) -> None:
+        self._annotations = {}
+        if self._annotation_path and self._annotation_path.exists():
+            import json
+            try:
+                with open(self._annotation_path, "r") as f:
+                    self._annotations = json.load(f)
+            except Exception as e:
+                print(f"Failed to load annotations: {e}")
+        self._update_annotation_label()
+
+    def _update_annotation_label(self) -> None:
+        count = len(self._annotations)
+        
+        # Update List Widget
+        self.list_annotations.blockSignals(True)
+        self.list_annotations.clear()
+        # Sort by frame index
+        sorted_keys = sorted(self._annotations.keys(), key=lambda x: int(x))
+        for k in sorted_keys:
+            v = self._annotations[k]
+            name = self.behavior_names[v] if 0 <= v < len(self.behavior_names) else f"cls:{v}"
+            self.list_annotations.addItem(f"Frame {k}: {name}")
+        self.list_annotations.blockSignals(False)
+
+        # Update Current Info
+        curr = self._annotations.get(str(self._current_frame))
+        if curr is not None:
+            name = self.behavior_names[curr]
+            self.lbl_saved_info.setText(f"Total: {count} | Current: {name}")
+            self.lbl_saved_info.setStyleSheet("color: #00AA00; font-weight: bold;")
+        else:
+            self.lbl_saved_info.setText(f"Total: {count} | Current: None")
+            self.lbl_saved_info.setStyleSheet("")
+
+    def _on_anno_clicked(self, item) -> None:
+        text = item.text()
+        # Extract frame number from "Frame XXX: Behavior"
+        try:
+            f_str = text.split(":")[0].split(" ")[1]
+            self.set_frame(int(f_str))
+        except:
+            pass
+
+    def _delete_annotation(self) -> None:
+        item = self.list_annotations.currentItem()
+        if not item:
+            return
+            
+        try:
+            f_str = item.text().split(":")[0].split(" ")[1]
+            if f_str in self._annotations:
+                del self._annotations[f_str]
+                
+                # Save changes
+                if self._annotation_path:
+                    import json
+                    with open(self._annotation_path, "w") as f:
+                        json.dump(self._annotations, f, indent=2)
+                
+                self._update_annotation_label()
+                self.set_frame(self._current_frame)
+        except:
+            pass
 
     def _autoload_predictions_for_video(self, video_path: Path) -> Predictions:
         """Auto-load prediction files next to a video.
@@ -364,15 +506,23 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         raise SystemExit(f"Unsupported bbox file type: {bbox}")
 
     # --- controls ---
+    def toggle_play(self) -> None:
+        if self._playing:
+            self.pause()
+        else:
+            self.play()
+
     def play(self) -> None:
         if self._playing:
             return
         self._playing = True
+        self.btn_toggle_play.setText("Pause")
         interval_ms = int(round(1000.0 / max(1e-3, self.playback_fps)))
         self._timer.start(interval_ms)
 
     def pause(self) -> None:
         self._playing = False
+        self.btn_toggle_play.setText("Play")
         self._timer.stop()
 
     def step(self, delta: int) -> None:
@@ -439,6 +589,9 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.slider.blockSignals(True)
         self.slider.setValue(idx)
         self.slider.blockSignals(False)
+        self.jump_box.blockSignals(True)
+        self.jump_box.setValue(idx)
+        self.jump_box.blockSignals(False)
         self.lbl_frame.setText(str(idx))
 
         if self.chk_heatmap.isChecked():
@@ -461,6 +614,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         qimg = _bgr_to_qimage(frame)
         pix = QtGui.QPixmap.fromImage(qimg)
         self.image_label.setPixmap(pix)
+        self._update_annotation_label()
 
     def _on_tick(self) -> None:
         if self.video is None or self.preds is None:

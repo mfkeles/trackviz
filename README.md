@@ -5,7 +5,16 @@ predictions (bboxes + track IDs + confidences) frame-by-frame.
 
 ## Install (dev)
 
+### Using Pip
 ```bash
+pip install -e .
+```
+
+### Using Conda
+If you prefer using a Conda environment:
+```bash
+conda create -n trackviz python=3.10 -y
+conda activate trackviz
 pip install -e .
 ```
 
@@ -23,8 +32,18 @@ Open the viewer with no arguments, then drag a video file into the window:
 trackviz gui
 ```
 
-When you drop `my_video.mp4`, trackviz will look in the same folder for matching files:
+When you drop `my_video.mp4`, trackviz will look in the same folder for matching files. It supports several workflows:
 
+### 1. Flyloop YOLO Workflow (Single File)
+Optimized for behavioral neuroscience experiments using the `flyloop` system.
+- Looks for `<run_id>_yolo_fast.pkl` (even if timestamps differ slightly).
+- Overlays behavioral class names (e.g., "ProbPumping", "Grooming").
+- Supports **Heatmap Mode**: Toggling this shows the real-time 6-frame motion heatmap used by the model during inference.
+
+### 2. Standard NPZ Workflow
+- `my_video.npz` or `my_video_preds.npz` containing bboxes, confidences, and track_ids.
+
+### 3. Triplet Workflow (npy/csv)
 - `my_video_bboxes.npy` or `my_video_bboxes.csv` (required)
 - `my_video_confidences.npy` or `my_video_confidences.csv` (optional)
 - `my_video_track_ids.npy` or `my_video_track_ids.csv` (optional)
@@ -32,7 +51,14 @@ When you drop `my_video.mp4`, trackviz will look in the same folder for matching
 
 It also supports the generic fallback names `bboxes.*`, `confidences.*`, `track_ids.*`, `metadata.npz`.
 
-### Supported prediction formats
+## Features for Long Videos
+
+`trackviz` is optimized for ultra-long recordings (e.g., 16-hour experiments):
+- **Sequential Decoding**: Uses sequential frame reading during playback to avoid high-latency seeks.
+- **Sliding Window Cache**: Heatmap generation uses a frame cache to reduce decoding overhead by ~80%.
+- **Smart Seek**: Intelligent frame management to maintain responsiveness during scrubbing.
+
+## Supported prediction formats
 
 1) **Dense per-frame arrays** (common when you have <=1 object per frame):
 
