@@ -16,6 +16,8 @@ class OverlayStyle:
     font_thickness: int = 2
     show_confidence: bool = True
     show_track_id: bool = True
+    show_class: bool = True
+    class_names: Optional[List[str]] = None
 
 
 def draw_overlays(
@@ -26,6 +28,8 @@ def draw_overlays(
     """Return a copy of frame with overlays."""
     if style is None:
         style = OverlayStyle()
+    
+    class_names = style.class_names
 
     out = frame_bgr.copy()
     h, w = out.shape[:2]
@@ -43,6 +47,11 @@ def draw_overlays(
         cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 0), style.box_thickness)
 
         parts = []
+        if style.show_class and det.cls is not None:
+            if class_names and 0 <= det.cls < len(class_names):
+                parts.append(class_names[det.cls])
+            else:
+                parts.append(f"cls:{det.cls}")
         if style.show_track_id and det.track_id is not None:
             parts.append(f"id:{det.track_id}")
         if style.show_confidence and det.confidence is not None:

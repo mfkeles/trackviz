@@ -20,7 +20,7 @@ def _bgr_to_qimage(img_bgr: np.ndarray) -> QtGui.QImage:
 
 
 class VideoReader:
-    """Thin wrapper around cv2.VideoCapture with frame-count inference."""
+    """Thin wrapper around cv2.VideoCapture with frame-count inference and caching."""
 
     def __init__(self, video_path: str):
         self.video_path = video_path
@@ -30,16 +30,24 @@ class VideoReader:
         fps = self.cap.get(cv2.CAP_PROP_FPS)
         self.fps = float(fps) if fps and fps > 0 else 30.0
         self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        self._last_idx = -1
+        self._cache = {} # Simple LRU-ish cache for heatmap frames
 
     def read_frame(self, idx: int) -> Optional[np.ndarray]:
         idx = int(idx)
         if idx < 0:
             return None
-        # random access; can be slow for some codecs
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        
+        # OPTIMIZATION: If we are asking for the next frame, don't 'set' position.
+        # This is massively faster for long videos.
+        if idx != self._last_idx + 1:
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        
         ok, frame = self.cap.read()
         if not ok:
             return None
+            
+        self._last_idx = idx
         return frame
 
     def release(self) -> None:
@@ -111,6 +119,10 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.chk_overlay.setChecked(True)
         v.addWidget(self.chk_overlay)
 
+        self.chk_heatmap = QtWidgets.QCheckBox("Heatmap Mode")
+        self.chk_heatmap.setChecked(False)
+        v.addWidget(self.chk_heatmap)
+
         # --- state ---
         self._playing = False
         self._current_frame = 0
@@ -123,6 +135,8 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.btn_prev.clicked.connect(lambda: self.step(-1))
         self.btn_next.clicked.connect(lambda: self.step(+1))
         self.slider.valueChanged.connect(self.set_frame)
+        self.chk_overlay.stateChanged.connect(lambda: self.set_frame(self._current_frame))
+        self.chk_heatmap.stateChanged.connect(lambda: self.set_frame(self._current_frame))
 
         # init: show blank until a video is loaded
         self._show_blank()
@@ -202,9 +216,14 @@ class TrackVizWindow(QtWidgets.QMainWindow):
 
         # Finish wiring up state/UI
         self.preds = preds
-        self.max_frames = min(self.video.frame_count or self.preds.total_frames, self.preds.total_frames)
-        if self.max_frames <= 0:
-            self.max_frames = self.preds.total_frames
+        v_count = self.video.frame_count
+        p_count = self.preds.total_frames
+        
+        # Use video count if available, otherwise fallback to predictions
+        if v_count > 0:
+            self.max_frames = v_count
+        else:
+            self.max_frames = p_count
 
         self.slider.blockSignals(True)
         self.slider.setMaximum(max(0, self.max_frames - 1))
@@ -233,6 +252,57 @@ class TrackVizWindow(QtWidgets.QMainWindow):
                     return c
             return None
 
+        # 1. Try Flyloop's YOLO pickle format (single file)
+        run_id = stem
+        if stem.endswith("_raw"):
+            run_id = stem[:-4]
+
+        yolo_pkl = _pick(
+            [
+                root / f"{run_id}_yolo_fast.pkl",
+                root / f"{stem}_yolo_fast.pkl",
+                root / "yolo_fast.pkl",
+                root / "results" / f"{run_id}_yolo_fast.pkl",
+                root / "results" / f"{stem}_yolo_fast.pkl",
+                root / "results" / "yolo_fast.pkl",
+                root / ".." / "results" / f"{run_id}_yolo_fast.pkl",
+            ]
+        )
+        
+        # If no direct match, look for any yolo_fast.pkl in the same folder
+        if not yolo_pkl:
+            possible_pkls = list(root.glob("*_yolo_fast.pkl"))
+            if not possible_pkls:
+                possible_pkls = list(root.glob("results/*_yolo_fast.pkl"))
+            
+            if len(possible_pkls) == 1:
+                yolo_pkl = possible_pkls[0]
+            elif len(possible_pkls) > 1:
+                # If there are multiple, try to find the one with the same date part (YYYYMMDD)
+                date_part = run_id.split("_")[0]
+                matches = [p for p in possible_pkls if p.stem.startswith(date_part)]
+                if len(matches) == 1:
+                    yolo_pkl = matches[0]
+
+        if yolo_pkl:
+            return Predictions.from_yolo_pickle(
+                yolo_pkl, 
+                expected_total_frames=self.video.frame_count if self.video else None
+            )
+
+        # 2. Try standard NPZ (single file)
+        npz_file = _pick(
+            [
+                root / f"{stem}.npz",
+                root / f"{stem}_preds.npz",
+                root / "predictions.npz",
+                root / "preds.npz",
+            ]
+        )
+        if npz_file:
+            return Predictions.from_npz(npz_file)
+
+        # 3. Try Triplet (bboxes, confidences, track_ids)
         bbox = _pick(
             [
                 root / f"{stem}_bboxes.npy",
@@ -242,7 +312,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             ]
         )
         if bbox is None:
-            raise SystemExit(f"Could not find bboxes next to video: {video_path}")
+            raise SystemExit(f"Could not find any supported prediction files (YOLO pickle, NPZ, or bboxes) next to video: {video_path}")
 
         conf = _pick(
             [
@@ -309,6 +379,52 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.pause()
         self.set_frame(self._current_frame + int(delta))
 
+    def _generate_heatmap(self, idx: int) -> Optional[np.ndarray]:
+        if self.video is None:
+            return None
+        
+        window_size = 6
+        frames = []
+        
+        # We'll use a local cache on the VideoReader for the grayscale frames
+        # so they can be reused across multiple calls (like when playing)
+        for i in range(max(0, idx - window_size + 1), idx + 1):
+            if i in self.video._cache:
+                frames.append(self.video._cache[i])
+            else:
+                f = self.video.read_frame(i)
+                if f is not None:
+                    if f.ndim == 3:
+                        f = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+                    self.video._cache[i] = f
+                    frames.append(f)
+        
+        # Housekeeping: remove old frames from cache
+        if len(self.video._cache) > 20: # keep a small buffer
+            oldest = min(self.video._cache.keys())
+            if oldest < idx - window_size - 10:
+                del self.video._cache[oldest]
+        
+        if not frames:
+            return None
+            
+        ref_gray = frames[0]
+        h, w = ref_gray.shape
+        accumulator = np.zeros((h, w), dtype=np.float32)
+        threshold = 10
+        
+        for i in range(1, len(frames)):
+            diff = cv2.absdiff(ref_gray, frames[i])
+            _, mask = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
+            accumulator += mask
+            
+        mx = accumulator.max()
+        acc_u8 = (accumulator * (255.0 / mx)).astype(np.uint8) if mx > 0 else np.zeros_like(ref_gray, dtype=np.uint8)
+        heatmap = cv2.applyColorMap(acc_u8, cv2.COLORMAP_HOT)
+        ref_bgr = cv2.cvtColor(ref_gray, cv2.COLOR_GRAY2BGR)
+        overlay = cv2.addWeighted(ref_bgr, 0.6, heatmap, 0.4, 0)
+        return overlay
+
     def set_frame(self, idx: int) -> None:
         idx = int(idx)
         if self.video is None or self.preds is None or self.max_frames <= 0:
@@ -325,7 +441,11 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.slider.blockSignals(False)
         self.lbl_frame.setText(str(idx))
 
-        frame = self.video.read_frame(idx)
+        if self.chk_heatmap.isChecked():
+            frame = self._generate_heatmap(idx)
+        else:
+            frame = self.video.read_frame(idx)
+            
         if frame is None:
             # graceful fallback: show blank
             self._show_blank()
@@ -333,7 +453,10 @@ class TrackVizWindow(QtWidgets.QMainWindow):
 
         if self.chk_overlay.isChecked():
             dets = self.preds.for_frame(idx)
-            frame = draw_overlays(frame, dets, self.cfg.overlay_style)
+            style = self.cfg.overlay_style
+            if self.preds.meta.get("class_names"):
+                style.class_names = self.preds.meta["class_names"]
+            frame = draw_overlays(frame, dets, style)
 
         qimg = _bgr_to_qimage(frame)
         pix = QtGui.QPixmap.fromImage(qimg)

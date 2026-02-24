@@ -32,10 +32,12 @@ class Predictions:
         dense_bbox_xyxy: Optional[np.ndarray] = None,     # (T,4) or None
         dense_conf: Optional[np.ndarray] = None,         # (T,) or None
         dense_track_id: Optional[np.ndarray] = None,     # (T,) or None
+        dense_cls: Optional[np.ndarray] = None,          # (T,) or None
         ragged_frame_idx: Optional[np.ndarray] = None,   # (N,) or None
         ragged_bbox_xyxy: Optional[np.ndarray] = None,   # (N,4) or None
         ragged_conf: Optional[np.ndarray] = None,        # (N,) or None
         ragged_track_id: Optional[np.ndarray] = None,    # (N,) or None
+        ragged_cls: Optional[np.ndarray] = None,         # (N,) or None
         meta: Optional[Dict] = None,
     ):
         self.total_frames = int(total_frames)
@@ -44,11 +46,13 @@ class Predictions:
         self._dense_bbox = dense_bbox_xyxy
         self._dense_conf = dense_conf
         self._dense_tid = dense_track_id
+        self._dense_cls = dense_cls
 
         self._ragged_frame_idx = ragged_frame_idx
         self._ragged_bbox = ragged_bbox_xyxy
         self._ragged_conf = ragged_conf
         self._ragged_tid = ragged_track_id
+        self._ragged_cls = ragged_cls
 
         self._ragged_index: Optional[List[np.ndarray]] = None
         if self._ragged_frame_idx is not None:
@@ -84,12 +88,19 @@ class Predictions:
                 tid_int = None
                 if tid is not None and np.isfinite(tid):
                     tid_int = int(tid)
+                
+                cls_id = None if self._dense_cls is None else self._dense_cls[i]
+                cls_int = None
+                if cls_id is not None and np.isfinite(cls_id):
+                    cls_int = int(cls_id)
+
                 dets.append(
                     Detection(
                         frame=i,
                         bbox_xyxy=(float(b[0]), float(b[1]), float(b[2]), float(b[3])),
                         confidence=conf,
                         track_id=tid_int,
+                        cls=cls_int,
                     )
                 )
 
@@ -99,6 +110,8 @@ class Predictions:
                 bboxes = self._ragged_bbox[idxs]
                 confs = None if self._ragged_conf is None else self._ragged_conf[idxs]
                 tids = None if self._ragged_tid is None else self._ragged_tid[idxs]
+                clss = None if self._ragged_cls is None else self._ragged_cls[idxs]
+
                 for k in range(len(idxs)):
                     b = np.asarray(bboxes[k])
                     if not self._is_valid_bbox(b):
@@ -113,12 +126,20 @@ class Predictions:
                         t = float(tids[k])
                         if np.isfinite(t):
                             tid_int = int(t)
+                    
+                    cls_int = None
+                    if clss is not None:
+                        c = float(clss[k])
+                        if np.isfinite(c):
+                            cls_int = int(c)
+
                     dets.append(
                         Detection(
                             frame=i,
                             bbox_xyxy=(float(b[0]), float(b[1]), float(b[2]), float(b[3])),
                             confidence=conf,
                             track_id=tid_int,
+                            cls=cls_int,
                         )
                     )
 
@@ -228,6 +249,65 @@ class Predictions:
             dense_conf=conf,
             dense_track_id=tids,
             meta=meta,
+        )
+
+    @classmethod
+    def from_yolo_pickle(cls, path: Union[str, Path], expected_total_frames: Optional[int] = None) -> "Predictions":
+        """Load predictions from the YOLO pickle format used by flyloop.
+        
+        The file is a series of pickled dictionaries:
+        {
+            "heatmap_seq": int,
+            "frame_seq": int,
+            "boxes": np.ndarray (N, 4),
+            "confs": np.ndarray (N,),
+            "classes": np.ndarray (N,),
+        }
+        """
+        import pickle
+        path = Path(path)
+        
+        frame_indices = []
+        bboxes = []
+        confs = []
+        clss = []
+        
+        max_frame = 0
+        with open(path, "rb") as f:
+            while True:
+                try:
+                    data = pickle.load(f)
+                    # stream.py uses 1-based indexing for frame_idx
+                    f_idx = data["frame_seq"] - 1 
+                    if f_idx < 0:
+                        continue
+                        
+                    n = len(data["boxes"])
+                    if n > 0:
+                        for i in range(n):
+                            frame_indices.append(f_idx)
+                            bboxes.append(data["boxes"][i])
+                            confs.append(data["confs"][i])
+                            clss.append(data["classes"][i])
+                    
+                    if f_idx > max_frame:
+                        max_frame = f_idx
+                except EOFError:
+                    break
+        
+        total_frames = expected_total_frames if expected_total_frames is not None else (max_frame + 1)
+        
+        return cls(
+            total_frames=total_frames,
+            ragged_frame_idx=np.array(frame_indices),
+            ragged_bbox_xyxy=np.array(bboxes) if bboxes else np.empty((0, 4)),
+            ragged_conf=np.array(confs) if confs else np.empty((0,)),
+            ragged_cls=np.array(clss) if clss else np.empty((0,)),
+            meta={
+                "source": "yolo_pickle", 
+                "path": str(path),
+                "class_names": ["ProbPumping", "Moving", "Grooming", "Feeding", "Quiescent", "HaltereSwitch"]
+            }
         )
 
     @classmethod
