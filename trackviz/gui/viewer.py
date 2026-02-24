@@ -75,6 +75,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("trackviz")
 
         self.setAcceptDrops(True)
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
 
         self.video: Optional[VideoReader] = None
         self.preds: Optional[Predictions] = None
@@ -193,8 +194,16 @@ class TrackVizWindow(QtWidgets.QMainWindow):
                 self.play()
 
     def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
-        if event.key() == QtCore.Qt.Key_Space:
+        key = event.key()
+        if key == QtCore.Qt.Key_Space:
             self.toggle_play()
+            event.accept()
+        elif key == QtCore.Qt.Key_Left:
+            self.step(-1)
+            event.accept()
+        elif key == QtCore.Qt.Key_Right:
+            self.step(1)
+            event.accept()
         else:
             super().keyPressEvent(event)
 
