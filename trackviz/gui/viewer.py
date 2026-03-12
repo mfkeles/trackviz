@@ -477,7 +477,20 @@ class TrackVizWindow(QtWidgets.QMainWindow):
                 expected_total_frames=self.video.frame_count if self.video else None
             )
 
-        # 2. Try standard NPZ (single file)
+        # 2. Try results NPY (array-of-dicts format)
+        results_npy = _pick(
+            [
+                root / f"{stem}_results.npy",
+                root / "results.npy",
+            ]
+        )
+        if results_npy:
+            return Predictions.from_results_npy(
+                results_npy,
+                expected_total_frames=self.video.frame_count if self.video else None,
+            )
+
+        # 3. Try standard NPZ (single file)
         npz_file = _pick(
             [
                 root / f"{stem}.npz",
@@ -489,7 +502,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         if npz_file:
             return Predictions.from_npz(npz_file)
 
-        # 3. Try Triplet (bboxes, confidences, track_ids)
+        # 4. Try Triplet (bboxes, confidences, track_ids)
         bbox = _pick(
             [
                 root / f"{stem}_bboxes.npy",

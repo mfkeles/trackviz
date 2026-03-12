@@ -252,6 +252,46 @@ class Predictions:
         )
 
     @classmethod
+    def from_results_npy(cls, path: Union[str, Path], expected_total_frames: Optional[int] = None) -> "Predictions":
+        """Load predictions from an array-of-dicts .npy file.
+
+        Each element is a dict with keys:
+            "frame": int  (0-based)
+            "bbox":  np.ndarray (4,) in xyxy pixel coords
+            "confidence": float  (optional)
+            "class": int         (optional)
+        """
+        path = Path(path)
+        data = np.load(path, allow_pickle=True)
+
+        frame_indices, bboxes, confs, clss = [], [], [], []
+        max_frame = 0
+        for record in data:
+            f = int(record["frame"])
+            frame_indices.append(f)
+            bboxes.append(np.asarray(record["bbox"], dtype=np.float32))
+            confs.append(float(record.get("confidence", np.nan)))
+            cls_val = record.get("class", 0)
+            clss.append(int(cls_val) if cls_val is not None and np.isfinite(float(cls_val)) else 0)
+            if f > max_frame:
+                max_frame = f
+
+        total_frames = expected_total_frames if expected_total_frames is not None else (max_frame + 1)
+
+        return cls(
+            total_frames=total_frames,
+            ragged_frame_idx=np.array(frame_indices, dtype=np.int64),
+            ragged_bbox_xyxy=np.array(bboxes, dtype=np.float32),
+            ragged_conf=np.array(confs, dtype=np.float32),
+            ragged_cls=np.array(clss, dtype=np.int32),
+            meta={
+                "source": "results_npy",
+                "path": str(path),
+                "class_names": ["ProbPumping", "Moving", "Grooming", "Feeding", "Quiescent"],
+            },
+        )
+
+    @classmethod
     def from_yolo_pickle(cls, path: Union[str, Path], expected_total_frames: Optional[int] = None) -> "Predictions":
         """Load predictions from the YOLO pickle format used by flyloop.
         
