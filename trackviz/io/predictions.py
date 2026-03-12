@@ -277,8 +277,11 @@ class Predictions:
             while True:
                 try:
                     data = pickle.load(f)
-                    # stream.py uses 1-based indexing for frame_idx
-                    f_idx = data["frame_seq"] - 1 
+                    # Support both key names: frame_seq (1-based) and frame_idx (0-based)
+                    if "frame_seq" in data:
+                        f_idx = data["frame_seq"] - 1
+                    else:
+                        f_idx = int(data["frame_idx"])
                     if f_idx < 0:
                         continue
                         

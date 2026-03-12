@@ -10,11 +10,18 @@ predictions (bboxes + track IDs + confidences) frame-by-frame.
 pip install -e .
 ```
 
-### Using Conda
-If you prefer using a Conda environment:
+> **AVI / codec support:** `opencv-python` from PyPI ships without FFmpeg on some platforms (notably macOS), so AVI files may fail to open. If you hit `Couldn't read movie file`, replace the PyPI OpenCV with the conda-forge build:
+> ```bash
+> pip uninstall opencv-python
+> conda install -c conda-forge opencv
+> ```
+
+### Using Conda (recommended on macOS)
+The conda-forge OpenCV build includes FFmpeg and handles AVI, MKV, and other formats correctly.
 ```bash
 conda create -n trackviz python=3.10 -y
 conda activate trackviz
+conda install -c conda-forge opencv
 pip install -e .
 ```
 

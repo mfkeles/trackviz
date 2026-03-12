@@ -24,7 +24,10 @@ class VideoReader:
 
     def __init__(self, video_path: str):
         self.video_path = video_path
-        self.cap = cv2.VideoCapture(video_path)
+        self.cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
+        if not self.cap.isOpened():
+            # Fallback: try default backend (e.g. AVFoundation on macOS)
+            self.cap = cv2.VideoCapture(video_path)
         if not self.cap.isOpened():
             raise ValueError(f"Could not open video: {video_path}")
         fps = self.cap.get(cv2.CAP_PROP_FPS)
@@ -186,6 +189,10 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.btn_delete_anno.clicked.connect(self._delete_annotation)
         self.list_annotations.itemClicked.connect(self._on_anno_clicked)
 
+        # --- status bar ---
+        self._status_bar = self.statusBar()
+        self._status_bar.showMessage("Ready — drag a video file to load.")
+
         # init: show blank until a video is loaded
         self._show_blank()
         if video_path is not None and preds is not None:
@@ -230,10 +237,12 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             try:
                 self.load_from_video_path(p)
             except SystemExit as e:
+                self._status_bar.showMessage(f"Error: {e}")
                 QtWidgets.QMessageBox.critical(self, "trackviz", str(e))
                 event.ignore()
                 return
             except Exception as e:
+                self._status_bar.showMessage(f"Error: {e}")
                 QtWidgets.QMessageBox.critical(self, "trackviz", f"Failed to load video/predictions:\n{e}")
                 event.ignore()
                 return
@@ -249,6 +258,8 @@ class TrackVizWindow(QtWidgets.QMainWindow):
 
     def load_video_and_predictions(self, video_path: str, preds: Predictions) -> None:
         self.pause()
+        self._status_bar.showMessage(f"Loading {Path(video_path).name}…")
+        QtWidgets.QApplication.processEvents()
 
         if self.video is not None:
             self.video.release()
@@ -271,15 +282,23 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.slider.blockSignals(False)
         self.jump_box.setMaximum(max(0, self.max_frames - 1))
         self.set_frame(0)
+        self._status_bar.showMessage(
+            f"Loaded {Path(video_path).name} — {self.max_frames} frames @ {self.video.fps:.1f} fps"
+        )
 
     def load_from_video_path(self, video_path: Path) -> None:
         # Open the video first (needed for fps/frame_count and for CSV expected_total_frames)
         self.pause()
+        self._status_bar.showMessage(f"Loading {video_path.name}…")
+        QtWidgets.QApplication.processEvents()
+
         if self.video is not None:
             self.video.release()
         self.video = VideoReader(str(video_path))
         self.playback_fps = self.cfg.playback_fps or self.video.fps
 
+        self._status_bar.showMessage(f"Loading predictions for {video_path.name}…")
+        QtWidgets.QApplication.processEvents()
         preds = self._autoload_predictions_for_video(video_path)
 
         # Handle annotations
@@ -290,7 +309,20 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.preds = preds
         v_count = self.video.frame_count
         p_count = self.preds.total_frames
-        
+
+        # Warn if counts differ significantly (>1% or >10 frames)
+        if v_count > 0 and p_count > 0 and abs(v_count - p_count) > max(10, int(0.01 * v_count)):
+            print(
+                f"[trackviz] Warning: video has {v_count} frames but predictions cover "
+                f"{p_count} frames. Overlays may be misaligned."
+            )
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Frame count mismatch",
+                f"Video: {v_count} frames\nPredictions: {p_count} frames\n\n"
+                "Overlays may be misaligned.",
+            )
+
         # Use video count if available, otherwise fallback to predictions
         if v_count > 0:
             self.max_frames = v_count
@@ -303,6 +335,9 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.slider.blockSignals(False)
         self.jump_box.setMaximum(max(0, self.max_frames - 1))
         self.set_frame(0)
+        self._status_bar.showMessage(
+            f"Loaded {video_path.name} — {self.max_frames} frames @ {self.video.fps:.1f} fps"
+        )
 
     def _save_annotation(self) -> None:
         if self._annotation_path is None:
@@ -358,29 +393,29 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         try:
             f_str = text.split(":")[0].split(" ")[1]
             self.set_frame(int(f_str))
-        except:
-            pass
+        except Exception as e:
+            print(f"[trackviz] Failed to navigate to annotation: {e}")
 
     def _delete_annotation(self) -> None:
         item = self.list_annotations.currentItem()
         if not item:
             return
-            
+
         try:
             f_str = item.text().split(":")[0].split(" ")[1]
             if f_str in self._annotations:
                 del self._annotations[f_str]
-                
+
                 # Save changes
                 if self._annotation_path:
                     import json
                     with open(self._annotation_path, "w") as f:
                         json.dump(self._annotations, f, indent=2)
-                
+
                 self._update_annotation_label()
                 self.set_frame(self._current_frame)
-        except:
-            pass
+        except Exception as e:
+            print(f"[trackviz] Failed to delete annotation: {e}")
 
     def _autoload_predictions_for_video(self, video_path: Path) -> Predictions:
         """Auto-load prediction files next to a video.
