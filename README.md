@@ -21,7 +21,6 @@ The conda-forge OpenCV build includes FFmpeg and handles AVI, MKV, and other for
 ```bash
 conda create -n trackviz python=3.10 -y
 conda activate trackviz
-conda install -c conda-forge opencv
 pip install -e .
 ```
 
