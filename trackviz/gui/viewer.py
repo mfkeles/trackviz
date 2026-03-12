@@ -144,8 +144,9 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         label_layout = QtWidgets.QHBoxLayout()
         self.combo_classes = QtWidgets.QComboBox()
         self.behavior_names = [
-            "0: ProbPumping", "1: Moving", "2: Grooming", 
-            "3: Feeding", "4: Quiescent", "5: HaltereSwitch", "6: Twitching"
+            "0: ProbPumping", "1: Moving", "2: Grooming",
+            "3: Feeding", "4: Quiescent", "5: HaltereSwitch", "6: Twitching",
+            "7: Defecation"
         ]
         self.combo_classes.addItems(self.behavior_names)
         self.btn_label = QtWidgets.QPushButton("Label Frame")
