@@ -453,15 +453,18 @@ class TrackVizWindow(QtWidgets.QMainWindow):
                 root / "results" / f"{stem}_yolo_fast.pkl",
                 root / "results" / "yolo_fast.pkl",
                 root / ".." / "results" / f"{run_id}_yolo_fast.pkl",
+                root / f"{run_id}_tracking.pkl",
+                root / f"{stem}_tracking.pkl",
+                root / "tracking.pkl",
             ]
         )
         
-        # If no direct match, look for any yolo_fast.pkl in the same folder
+        # If no direct match, look for any supported pkl suffix in the same folder
         if not yolo_pkl:
-            possible_pkls = list(root.glob("*_yolo_fast.pkl"))
+            possible_pkls = list(root.glob("*_yolo_fast.pkl")) + list(root.glob("*_tracking.pkl"))
             if not possible_pkls:
-                possible_pkls = list(root.glob("results/*_yolo_fast.pkl"))
-            
+                possible_pkls = list(root.glob("results/*_yolo_fast.pkl")) + list(root.glob("results/*_tracking.pkl"))
+
             if len(possible_pkls) == 1:
                 yolo_pkl = possible_pkls[0]
             elif len(possible_pkls) > 1:
