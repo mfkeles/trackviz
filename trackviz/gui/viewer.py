@@ -281,6 +281,7 @@ class InteractiveImageWidget(QtWidgets.QLabel):
         pal = self.palette()
         pal.setColor(self.backgroundRole(), QtGui.QColor("#000000"))
         self.setPalette(pal)
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
 
         self._edit_mode = False
 
@@ -359,6 +360,13 @@ class InteractiveImageWidget(QtWidgets.QLabel):
         self._pending_idx = None
         self._selected = None
         self.update()
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if event.key() == QtCore.Qt.Key_Escape:
+            self.clear_pending()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
 
     # ------------------------------------------------------------------
     # Coordinate helpers
@@ -869,7 +877,8 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         v_right.addWidget(_hsep())
 
         self.lbl_edit_hint = QtWidgets.QLabel(
-            "0–7  select class  ·  S  save  ·  ←/→  step  ·  Space  play/pause\n"
+            "0–7  select class  ·  S  save  ·  Del  delete annotation\n"
+            "←/→  step  ·  Space  play/pause  ·  Esc  clear selection\n"
             "Edit Mode: click/drag a box, then press S."
         )
         self.lbl_edit_hint.setWordWrap(True)
@@ -923,6 +932,13 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             event.accept()
         elif key == QtCore.Qt.Key_Right:
             self.step(1)
+            event.accept()
+        elif key == QtCore.Qt.Key_Escape:
+            self.image_label.clear_pending()
+            self._status_bar.showMessage("Selection cleared")
+            event.accept()
+        elif key == QtCore.Qt.Key_Delete:
+            self._delete_current_annotation()
             event.accept()
         elif key == QtCore.Qt.Key_S:
             self._save_annotation()
@@ -1200,6 +1216,19 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         except Exception as e:
             print(f"[trackviz] Failed to delete annotation: {e}")
 
+    def _delete_current_annotation(self) -> None:
+        f_str = str(self._current_frame)
+        if f_str not in self._annotations:
+            self._status_bar.showMessage("No annotation on this frame")
+            return
+        del self._annotations[f_str]
+        if self._annotation_path:
+            with open(self._annotation_path, "w") as f:
+                json.dump(self._annotations, f, indent=2)
+        self._update_annotation_list()
+        self.set_frame(self._current_frame, force=True)
+        self._status_bar.showMessage(f"Annotation deleted — frame {self._current_frame}")
+
     # ------------------------------------------------------------------
     # Edit mode callbacks
     # ------------------------------------------------------------------
@@ -1210,9 +1239,27 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             self.pause()
         self.image_label.set_edit_mode(enabled)
         if enabled:
+            self._presselect_class_for_frame()
             self._status_bar.showMessage("Edit Mode on — click/drag a box, then press S to save.")
         else:
             self._status_bar.showMessage("Edit Mode off.")
+
+    def _presselect_class_for_frame(self) -> None:
+        """Set the class dropdown to match the current frame's annotation or prediction."""
+        # Existing annotation takes priority
+        anno = self._annotations.get(str(self._current_frame))
+        if anno is not None:
+            cls = anno.get("cls")
+            if cls is not None and 0 <= cls < self.combo_classes.count():
+                self.combo_classes.setCurrentIndex(cls)
+                return
+        # Fall back to first predicted detection
+        if self.preds is not None:
+            dets = self.preds.for_frame(self._current_frame)
+            if dets and dets[0].cls is not None:
+                cls = int(dets[0].cls)
+                if 0 <= cls < self.combo_classes.count():
+                    self.combo_classes.setCurrentIndex(cls)
 
     def _on_box_drawn(self, bbox: list) -> None:
         self._status_bar.showMessage("New box drawn — pick a class and press S to save.")
@@ -1325,6 +1372,9 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.jump_box.setValue(idx)
         self.jump_box.blockSignals(False)
         self.lbl_frame.setText(f"{idx} / {self.max_frames - 1}")
+
+        if self.chk_edit.isChecked():
+            self._presselect_class_for_frame()
 
         if self.chk_heatmap.isChecked():
             frame = self._generate_heatmap(idx)
