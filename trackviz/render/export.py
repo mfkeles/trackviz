@@ -25,6 +25,12 @@ _QUALITY_TO_CRF = {
     6: 22, 7: 20, 8: 18, 9: 16, 10: 15,
 }
 
+# Stop the export loop after this many consecutive unreadable frames.
+# CAP_PROP_FRAME_COUNT is often a few frames over the real count, so a small
+# tolerance prevents stopping prematurely on a single decode hiccup while still
+# terminating cleanly at genuine end-of-stream.
+_MAX_CONSECUTIVE_FAILURES = 5
+
 
 # ---------------------------------------------------------------------------
 # Enhanced overlay drawing (export-only)
@@ -134,6 +140,35 @@ def _crf_from_quality(quality: int) -> int:
     return _QUALITY_TO_CRF.get(max(1, min(10, quality)), 18)
 
 
+def _read_frame(
+    cap: cv2.VideoCapture,
+    absolute_idx: int,
+    last_good: Optional[np.ndarray],
+) -> Tuple[Optional[np.ndarray], bool]:
+    """Read the next frame from *cap*, recovering from transient decode errors.
+
+    Tries a sequential read first.  On failure, seeks to *absolute_idx* and
+    retries once — this recovers frames that are present in the file but whose
+    decoder state was corrupted by an earlier bad frame.  If both attempts fail
+    (true end-of-stream or genuinely missing frame), returns
+    (*last_good*, False) so the caller can decide to duplicate or stop.
+
+    Returns (frame, is_real) where *is_real* is False when a duplicate was
+    substituted.
+    """
+    ok, frame = cap.read()
+    if ok and frame is not None:
+        return frame, True
+
+    # Retry after an explicit seek — recovers from mid-stream decode glitches
+    cap.set(cv2.CAP_PROP_POS_FRAMES, absolute_idx)
+    ok, frame = cap.read()
+    if ok and frame is not None:
+        return frame, True
+
+    return last_good, False
+
+
 def _export_via_ffmpeg(
     cap: cv2.VideoCapture,
     output_path: Path,
@@ -174,11 +209,20 @@ def _export_via_ffmpeg(
     )
 
     try:
+        last_good: Optional[np.ndarray] = None
+        consecutive_failures = 0
         for i in range(n_frames):
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                break
-            frame = _render_frame(frame, start_frame + i, preds, style, annotations,
+            raw, is_real = _read_frame(cap, start_frame + i, last_good)
+            if raw is None:
+                break  # no frame at all (very start of video failed)
+            if is_real:
+                last_good = raw
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+                if consecutive_failures > _MAX_CONSECUTIVE_FAILURES:
+                    break
+            frame = _render_frame(raw, start_frame + i, preds, style, annotations,
                                    out_width, out_height, scale)
             proc.stdin.write(frame.tobytes())
             if on_progress is not None:
@@ -219,11 +263,20 @@ def _export_via_opencv(
         raise RuntimeError(f"OpenCV VideoWriter could not open: {output_path}")
     writer.set(cv2.VIDEOWRITER_PROP_QUALITY, q_prop)
 
+    last_good: Optional[np.ndarray] = None
+    consecutive_failures = 0
     for i in range(n_frames):
-        ok, frame = cap.read()
-        if not ok or frame is None:
+        raw, is_real = _read_frame(cap, start_frame + i, last_good)
+        if raw is None:
             break
-        frame = _render_frame(frame, start_frame + i, preds, style, annotations,
+        if is_real:
+            last_good = raw
+            consecutive_failures = 0
+        else:
+            consecutive_failures += 1
+            if consecutive_failures > _MAX_CONSECUTIVE_FAILURES:
+                break
+        frame = _render_frame(raw, start_frame + i, preds, style, annotations,
                                out_width, out_height, scale)
         writer.write(frame)
         if on_progress is not None:
