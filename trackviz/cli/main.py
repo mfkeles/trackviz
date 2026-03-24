@@ -51,6 +51,9 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="End time in seconds (default: end of video).")
     e.add_argument("--quality", type=int, default=8, metavar="1-10",
                    help="Encoder quality 1 (smallest) – 10 (best). Default: 8.")
+    e.add_argument("--scale", type=float, default=1.0, metavar="0.1-1.0",
+                   help="Output resolution scale factor (default: 1.0 = original size). "
+                        "E.g. 0.5 = half width and height.")
     e.add_argument("--no-annotations", action="store_true",
                    help="Skip loading <video_stem>_annotations.json (corrected boxes).")
     return p
@@ -200,8 +203,11 @@ def main() -> None:
             bar = "#" * filled + "-" * (bar_len - filled)
             print(f"\r  [{bar}] {pct:5.1f}%  {done}/{total} frames", end="", flush=True)
 
+        scale = max(0.01, min(1.0, args.scale))
+
         print(f"\nExporting {video_path.name} → {output_path}")
-        print(f"  frames {start_frame}–{end_frame}  ({duration_sec:.1f}s)  quality={quality}\n")
+        print(f"  frames {start_frame}–{end_frame}  ({duration_sec:.1f}s)"
+              f"  quality={quality}  scale={scale}\n")
 
         export_video(
             video_path=video_path,
@@ -211,6 +217,7 @@ def main() -> None:
             end_frame=end_frame,
             annotations=annotations,
             quality=quality,
+            scale=scale,
             on_progress=_progress,
         )
         print(f"\nDone → {output_path}")

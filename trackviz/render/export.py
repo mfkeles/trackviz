@@ -138,14 +138,15 @@ def _export_via_ffmpeg(
     cap: cv2.VideoCapture,
     output_path: Path,
     fps: float,
-    width: int,
-    height: int,
+    out_width: int,
+    out_height: int,
     start_frame: int,
     n_frames: int,
     preds: Predictions,
     style: OverlayStyle,
     annotations: dict,
     quality: int,
+    scale: float,
     on_progress: Optional[Callable[[int, int], None]],
 ) -> None:
     crf = _crf_from_quality(quality)
@@ -153,7 +154,7 @@ def _export_via_ffmpeg(
         "ffmpeg", "-y",
         "-f", "rawvideo",
         "-pix_fmt", "bgr24",
-        "-s", f"{width}x{height}",
+        "-s", f"{out_width}x{out_height}",
         "-r", f"{fps:.6f}",
         "-i", "pipe:0",
         "-c:v", "libx264",
@@ -177,7 +178,8 @@ def _export_via_ffmpeg(
             ok, frame = cap.read()
             if not ok or frame is None:
                 break
-            frame = _render_frame(frame, start_frame + i, preds, style, annotations)
+            frame = _render_frame(frame, start_frame + i, preds, style, annotations,
+                                   out_width, out_height, scale)
             proc.stdin.write(frame.tobytes())
             if on_progress is not None:
                 on_progress(i + 1, n_frames)
@@ -193,25 +195,26 @@ def _export_via_opencv(
     cap: cv2.VideoCapture,
     output_path: Path,
     fps: float,
-    width: int,
-    height: int,
+    out_width: int,
+    out_height: int,
     start_frame: int,
     n_frames: int,
     preds: Predictions,
     style: OverlayStyle,
     annotations: dict,
     quality: int,
+    scale: float,
     on_progress: Optional[Callable[[int, int], None]],
 ) -> None:
     ext = output_path.suffix.lower()
     candidates = ["XVID", "MJPG"] if ext == ".avi" else ["avc1", "H264", "mp4v"]
-    fourcc, codec_name = _pick_opencv_codec(output_path, width, height, candidates)
+    fourcc, codec_name = _pick_opencv_codec(output_path, out_width, out_height, candidates)
 
     # Map quality 1–10 to VIDEOWRITER_PROP_QUALITY 20–95
     q_prop = 20 + int((quality - 1) / 9 * 75)
 
     print(f"[trackviz export] OpenCV  codec={codec_name}  quality_prop={q_prop}")
-    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (out_width, out_height))
     if not writer.isOpened():
         raise RuntimeError(f"OpenCV VideoWriter could not open: {output_path}")
     writer.set(cv2.VIDEOWRITER_PROP_QUALITY, q_prop)
@@ -220,7 +223,8 @@ def _export_via_opencv(
         ok, frame = cap.read()
         if not ok or frame is None:
             break
-        frame = _render_frame(frame, start_frame + i, preds, style, annotations)
+        frame = _render_frame(frame, start_frame + i, preds, style, annotations,
+                               out_width, out_height, scale)
         writer.write(frame)
         if on_progress is not None:
             on_progress(i + 1, n_frames)
@@ -250,22 +254,45 @@ def _pick_opencv_codec(
 # Per-frame rendering (shared between both backends)
 # ---------------------------------------------------------------------------
 
+def _scale_det(det: Detection, scale: float) -> Detection:
+    x1, y1, x2, y2 = det.bbox_xyxy
+    return Detection(
+        frame=det.frame,
+        bbox_xyxy=(x1 * scale, y1 * scale, x2 * scale, y2 * scale),
+        cls=det.cls,
+        confidence=det.confidence,
+        track_id=det.track_id,
+    )
+
+
 def _render_frame(
     frame: np.ndarray,
     idx: int,
     preds: Predictions,
     style: OverlayStyle,
     annotations: dict,
+    out_width: int,
+    out_height: int,
+    scale: float,
 ) -> np.ndarray:
+    # Downscale first so overlays are drawn at output resolution
+    if scale != 1.0:
+        frame = cv2.resize(frame, (out_width, out_height), interpolation=cv2.INTER_AREA)
+
     dets: List[Detection] = preds.for_frame(idx)
+    if scale != 1.0:
+        dets = [_scale_det(d, scale) for d in dets]
     if dets:
         frame = _draw_overlays_export(frame, dets, style, _COLOR_PREDICTION)
 
     anno = annotations.get(str(idx))
     if anno and anno.get("corrected") and "bbox" in anno:
+        bbox = anno["bbox"]
+        if scale != 1.0:
+            bbox = [c * scale for c in bbox]
         corr_det = Detection(
             frame=idx,
-            bbox_xyxy=tuple(anno["bbox"]),
+            bbox_xyxy=tuple(bbox),
             cls=anno.get("cls"),
             confidence=None,
             track_id=None,
@@ -288,6 +315,7 @@ def export_video(
     style: Optional[OverlayStyle] = None,
     annotations: Optional[dict] = None,
     quality: int = 8,
+    scale: float = 1.0,
     on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> None:
     """Render video frames with overlays and write to *output_path*.
@@ -304,6 +332,10 @@ def export_video(
         quality:      Integer 1–10. With FFmpeg this maps to CRF 32–15
                       (lower CRF = higher quality, larger file).
                       With OpenCV fallback it maps to VIDEOWRITER_PROP_QUALITY.
+        scale:        Output resolution multiplier (default 1.0 = original size).
+                      0.5 halves width and height (quarter the pixel count).
+                      H.264 requires even dimensions — values are rounded up to
+                      the nearest even pixel automatically.
         on_progress:  Optional ``(frames_done, total_frames)`` callback.
     """
     if style is None:
@@ -323,6 +355,13 @@ def export_video(
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+    # Compute output dimensions — H.264 requires even width and height
+    scale = max(0.01, min(1.0, scale))
+    out_width = max(2, int(width * scale))
+    out_height = max(2, int(height * scale))
+    out_width += out_width % 2    # round up to even
+    out_height += out_height % 2
+
     start_frame = max(0, start_frame)
     if end_frame is None or end_frame < 0:
         end_frame = max(0, total_frames - 1)
@@ -336,14 +375,15 @@ def export_video(
         cap=cap,
         output_path=output_path,
         fps=fps,
-        width=width,
-        height=height,
+        out_width=out_width,
+        out_height=out_height,
         start_frame=start_frame,
         n_frames=n_frames,
         preds=preds,
         style=style,
         annotations=annotations,
         quality=quality,
+        scale=scale,
         on_progress=on_progress,
     )
 
