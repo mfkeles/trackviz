@@ -10,6 +10,7 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from trackviz.io.auto import autoload_predictions
+from trackviz.io.class_names import BEHAVIOR_NAMES, resolve_class_names
 from trackviz.io.predictions import Detection, Predictions
 from trackviz.render.overlay import OverlayStyle, draw_overlays
 
@@ -837,11 +838,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         lbl_behavior = QtWidgets.QLabel("Behavior")
         lbl_behavior.setObjectName("sectionHeader")
         self.combo_classes = QtWidgets.QComboBox()
-        self.behavior_names = [
-            "0: ProbPumping", "1: Moving", "2: Grooming",
-            "3: Feeding", "4: Quiescent", "5: HaltereSwitch", "6: Twitching",
-            "7: Defecation",
-        ]
+        self.behavior_names = [f"{i}: {n}" for i, n in enumerate(BEHAVIOR_NAMES)]
         self.combo_classes.addItems(self.behavior_names)
         self.combo_classes.setMinimumWidth(160)
         self.btn_label = QtWidgets.QPushButton("Save  [S]")
@@ -1389,8 +1386,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         # Always fetch dets (needed for widget hit-testing even when overlay is off)
         dets = self.preds.for_frame(idx)
         style = self.cfg.overlay_style
-        if self.preds.meta.get("class_names"):
-            style.class_names = self.preds.meta["class_names"]
+        style.class_names = resolve_class_names(self.preds.meta.get("class_names"))
 
         if self.chk_overlay.isChecked():
             frame = draw_overlays(frame, dets, style, box_color=_COLOR_ORIGINAL)
