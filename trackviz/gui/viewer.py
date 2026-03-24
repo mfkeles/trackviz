@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from trackviz.io.auto import autoload_predictions
 from trackviz.io.predictions import Detection, Predictions
 from trackviz.render.overlay import OverlayStyle, draw_overlays
 
@@ -1426,107 +1427,10 @@ class TrackVizWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
 
     def _autoload_predictions_for_video(self, video_path: Path) -> Predictions:
-        root = video_path.parent
-        stem = video_path.stem
-
-        def _pick(cands: list) -> Optional[Path]:
-            for c in cands:
-                if c.exists():
-                    return c
-            return None
-
-        run_id = stem
-        if stem.endswith("_raw"):
-            run_id = stem[:-4]
-
-        yolo_pkl = _pick(
-            [
-                root / f"{run_id}_yolo_fast.pkl",
-                root / f"{stem}_yolo_fast.pkl",
-                root / "yolo_fast.pkl",
-                root / "results" / f"{run_id}_yolo_fast.pkl",
-                root / "results" / f"{stem}_yolo_fast.pkl",
-                root / "results" / "yolo_fast.pkl",
-                root / ".." / "results" / f"{run_id}_yolo_fast.pkl",
-                root / f"{run_id}_tracking.pkl",
-                root / f"{stem}_tracking.pkl",
-                root / "tracking.pkl",
-            ]
+        return autoload_predictions(
+            video_path,
+            total_frames=self.video.frame_count if self.video else None,
         )
-
-        if not yolo_pkl:
-            possible_pkls = list(root.glob("*_yolo_fast.pkl")) + list(root.glob("*_tracking.pkl"))
-            if not possible_pkls:
-                possible_pkls = list(root.glob("results/*_yolo_fast.pkl")) + list(root.glob("results/*_tracking.pkl"))
-            if len(possible_pkls) == 1:
-                yolo_pkl = possible_pkls[0]
-            elif len(possible_pkls) > 1:
-                date_part = run_id.split("_")[0]
-                matches = [p for p in possible_pkls if p.stem.startswith(date_part)]
-                if len(matches) == 1:
-                    yolo_pkl = matches[0]
-
-        if yolo_pkl:
-            return Predictions.from_yolo_pickle(
-                yolo_pkl,
-                expected_total_frames=self.video.frame_count if self.video else None,
-            )
-
-        results_npy = _pick([root / f"{stem}_results.npy", root / "results.npy"])
-        if results_npy:
-            return Predictions.from_results_npy(
-                results_npy,
-                expected_total_frames=self.video.frame_count if self.video else None,
-            )
-
-        npz_file = _pick(
-            [root / f"{stem}.npz", root / f"{stem}_preds.npz",
-             root / "predictions.npz", root / "preds.npz"]
-        )
-        if npz_file:
-            return Predictions.from_npz(npz_file)
-
-        bbox = _pick(
-            [root / f"{stem}_bboxes.npy", root / f"{stem}_bboxes.csv",
-             root / "bboxes.npy", root / "bboxes.csv"]
-        )
-        if bbox is None:
-            raise SystemExit(
-                f"Could not find any supported prediction files next to video: {video_path}"
-            )
-
-        conf = _pick(
-            [root / f"{stem}_confidences.npy", root / f"{stem}_confidences.csv",
-             root / "confidences.npy", root / "confidences.csv",
-             root / "conf.npy", root / "conf.csv"]
-        )
-        tids = _pick(
-            [root / f"{stem}_track_ids.npy", root / f"{stem}_track_ids.csv",
-             root / "track_ids.npy", root / "track_ids.csv",
-             root / "ids.npy", root / "ids.csv"]
-        )
-        meta = _pick([root / f"{stem}_metadata.npz", root / "metadata.npz"])
-
-        if bbox.suffix.lower() == ".npy":
-            return Predictions.from_custom_npy_triplet(
-                bboxes_npy=bbox,
-                confidences_npy=conf if conf and conf.suffix.lower() == ".npy" else None,
-                track_ids_npy=tids if tids and tids.suffix.lower() == ".npy" else None,
-                metadata_npz=meta if meta else None,
-                bbox_format="auto",
-            )
-
-        if bbox.suffix.lower() == ".csv":
-            return Predictions.from_custom_csv_triplet(
-                bboxes_csv=bbox,
-                confidences_csv=conf if conf and conf.suffix.lower() == ".csv" else None,
-                track_ids_csv=tids if tids and tids.suffix.lower() == ".csv" else None,
-                metadata_npz=meta if meta else None,
-                expected_total_frames=self.video.frame_count if self.video is not None else None,
-                xywh_is_center=True,
-            )
-
-        raise SystemExit(f"Unsupported bbox file type: {bbox}")
 
 
 # ---------------------------------------------------------------------------

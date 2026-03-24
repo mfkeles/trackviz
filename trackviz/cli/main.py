@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Optional
 
 import cv2
 
 from trackviz.gui.viewer import ViewerConfig, run_viewer
+from trackviz.io.auto import autoload_predictions
 from trackviz.io.predictions import Predictions
 
 
@@ -35,6 +37,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Interpret CSV bbox columns (x,y,w,h) as YOLO format (x/y are center).",
     )
     v.add_argument("--autoplay", action="store_true", help="Start playing immediately.")
+
+    e = sub.add_parser("export", help="Render video with prediction overlays and save to a file.")
+    e.add_argument("video", type=str, help="Path to the source video file.")
+    e.add_argument("--preds", type=str, default=None,
+                   help="Predictions file (.pkl/.npz/.npy) or directory. "
+                        "Auto-detected from the video directory if omitted.")
+    e.add_argument("--output", "-o", type=str, default=None,
+                   help="Output file path (default: <video_stem>_overlay.mp4 next to source).")
+    e.add_argument("--start", type=float, default=None,
+                   help="Start time in seconds (default: beginning of video).")
+    e.add_argument("--end", type=float, default=None,
+                   help="End time in seconds (default: end of video).")
+    e.add_argument("--quality", type=int, default=8, metavar="1-10",
+                   help="Encoder quality 1 (smallest) – 10 (best). Default: 8.")
+    e.add_argument("--no-annotations", action="store_true",
+                   help="Skip loading <video_stem>_annotations.json (corrected boxes).")
     return p
 
 
@@ -132,3 +150,67 @@ def main() -> None:
         preds = _load_preds(args)
         cfg = ViewerConfig(start_paused=not args.autoplay)
         run_viewer(args.video, preds, cfg)
+
+    if args.cmd == "export":
+        from trackviz.render.export import export_video, load_annotations
+
+        video_path = Path(args.video)
+        if not video_path.exists():
+            raise SystemExit(f"Video not found: {video_path}")
+
+        # Resolve output path
+        output_path = Path(args.output) if args.output else \
+            video_path.parent / (video_path.stem + "_overlay.mp4")
+
+        # Determine frame range from times
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            raise SystemExit(f"Cannot open video: {video_path}")
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        cap.release()
+
+        start_frame = int(args.start * fps) if args.start is not None else 0
+        end_frame = int(args.end * fps) if args.end is not None else total_frames - 1
+        start_frame = max(0, start_frame)
+        end_frame = min(end_frame, total_frames - 1)
+        n_frames = end_frame - start_frame + 1
+        duration_sec = n_frames / fps
+
+        # Warn if export is longer than 10 minutes
+        if duration_sec > 600:
+            mins = duration_sec / 60
+            print(f"\nWarning: you are about to export {mins:.1f} minutes of video "
+                  f"({n_frames:,} frames).")
+            answer = input("Continue? [y/N] ").strip().lower()
+            if answer not in ("y", "yes"):
+                print("Export cancelled.")
+                sys.exit(0)
+
+        preds_hint = Path(args.preds) if args.preds else None
+        preds = autoload_predictions(video_path, total_frames, preds_hint)
+        annotations = {} if args.no_annotations else load_annotations(video_path)
+
+        quality = max(1, min(10, args.quality))
+
+        def _progress(done: int, total: int) -> None:
+            pct = done / total * 100
+            bar_len = 40
+            filled = int(bar_len * done / total)
+            bar = "#" * filled + "-" * (bar_len - filled)
+            print(f"\r  [{bar}] {pct:5.1f}%  {done}/{total} frames", end="", flush=True)
+
+        print(f"\nExporting {video_path.name} → {output_path}")
+        print(f"  frames {start_frame}–{end_frame}  ({duration_sec:.1f}s)  quality={quality}\n")
+
+        export_video(
+            video_path=video_path,
+            preds=preds,
+            output_path=output_path,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            annotations=annotations,
+            quality=quality,
+            on_progress=_progress,
+        )
+        print(f"\nDone → {output_path}")
