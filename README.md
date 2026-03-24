@@ -1,7 +1,6 @@
 # trackviz
 
-A small Python package that opens a **scrubbable, playable** video window and overlays your model's
-predictions (bboxes + track IDs + confidences) frame-by-frame.
+A Python package for **scrubbing, playing, and annotating** videos with model predictions (bboxes + track IDs + confidences) frame-by-frame.
 
 ## Install (dev)
 
@@ -56,6 +55,48 @@ Optimized for behavioral neuroscience experiments using the `flyloop` system.
 - `my_video_metadata.npz` (optional)
 
 It also supports the generic fallback names `bboxes.*`, `confidences.*`, `track_ids.*`, `metadata.npz`.
+
+## Annotation System
+
+trackviz includes a full frame-by-frame annotation workflow, including bounding box correction.
+
+### Labeling frames
+
+Each frame can have one annotation: a behavior class plus a bounding box. To label the current frame:
+
+1. Select a behavior class from the **Behavior** dropdown (or press a number key `0`–`7`).
+2. Press **Save [S]** or the `S` hotkey.
+
+When saved, the predicted bounding box for that frame is automatically stored alongside the class label.
+
+Annotations are saved to `<video_stem>_annotations.json` next to the video file and reload automatically on the next session.
+
+### Bounding box correction (Edit Mode)
+
+Enable **Edit Mode** to interactively correct bounding boxes:
+
+- **Select** an existing predicted or corrected box by clicking inside it.
+- **Move** a selected box by dragging.
+- **Resize** a selected box by dragging any of the 8 handles (corners + edge midpoints).
+- **Draw** a new box by clicking and dragging on empty space.
+
+After editing, press **Save [S]** to save the annotation. The corrected box renders in **cyan**; predicted boxes render in **green**. Corrected entries appear with a `✓` in the annotation list.
+
+### Annotation list (sidebar)
+
+All annotations are shown in the persistent sidebar list:
+- **Double-click** any entry to jump to that frame.
+- Select an entry and press **Delete Selected** to remove it.
+- Deleting an annotation immediately updates the frame display.
+
+### Hotkeys
+
+| Key | Action |
+|-----|--------|
+| `0`–`7` | Select behavior class |
+| `S` | Save annotation for current frame |
+| `Space` | Play / Pause |
+| `←` / `→` | Step one frame back / forward |
 
 ## Features for Long Videos
 

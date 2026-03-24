@@ -24,11 +24,17 @@ def draw_overlays(
     frame_bgr: np.ndarray,
     detections: List[Detection],
     style: Optional[OverlayStyle] = None,
+    box_color: Tuple[int, int, int] = (0, 255, 0),
 ) -> np.ndarray:
-    """Return a copy of frame with overlays."""
+    """Return a copy of frame with overlays.
+
+    Args:
+        box_color: BGR color for boxes and labels (default green). Pass
+            ``(0, 200, 255)`` for cyan to distinguish corrected boxes.
+    """
     if style is None:
         style = OverlayStyle()
-    
+
     class_names = style.class_names
 
     out = frame_bgr.copy()
@@ -44,7 +50,7 @@ def draw_overlays(
         if x2 <= x1 or y2 <= y1:
             continue
 
-        cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 0), style.box_thickness)
+        cv2.rectangle(out, (x1, y1), (x2, y2), box_color, style.box_thickness)
 
         parts = []
         if style.show_class and det.cls is not None:
@@ -80,7 +86,7 @@ def draw_overlays(
                 (x1, y_text),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 style.font_scale,
-                (0, 255, 0),
+                box_color,
                 style.font_thickness,
                 cv2.LINE_AA,
             )
