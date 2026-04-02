@@ -14,6 +14,7 @@ dependencies = [
   "numpy>=1.23",
   "opencv-python>=4.8",
   "PySide6>=6.5",
+  "matplotlib>=3.6",
 ]
 
 [project.scripts]

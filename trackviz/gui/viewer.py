@@ -830,6 +830,9 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         opts.addWidget(self.chk_heatmap)
         opts.addWidget(self.chk_edit)
         opts.addStretch()
+        self.btn_snapshot = QtWidgets.QPushButton("Save Frame  [P]")
+        self.btn_snapshot.setObjectName("btnSnapshot")
+        opts.addWidget(self.btn_snapshot)
         v.addLayout(opts)
 
         # Behavior / save row
@@ -877,7 +880,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.lbl_edit_hint = QtWidgets.QLabel(
             "0–7  select class  ·  S  save  ·  Del  delete annotation\n"
             "←/→  step  ·  Space  play/pause  ·  Esc  clear selection\n"
-            "Edit Mode: click/drag a box, then press S."
+            "P  save frame snapshot  ·  Edit Mode: click/drag a box, then S."
         )
         self.lbl_edit_hint.setWordWrap(True)
         self.lbl_edit_hint.setStyleSheet("color: #555878; font-size: 11px;")
@@ -888,6 +891,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self._current_frame = 0
         self._annotations: Dict[str, dict] = {}
         self._annotation_path: Optional[Path] = None
+        self._current_raw_frame: Optional[np.ndarray] = None
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._on_tick)
 
@@ -901,6 +905,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.jump_btn.clicked.connect(lambda: self.set_frame(self.jump_box.value()))
         self.btn_label.clicked.connect(self._save_annotation)
         self.btn_delete_anno.clicked.connect(self._delete_annotation)
+        self.btn_snapshot.clicked.connect(self._save_frame_snapshot)
         self.list_annotations.itemDoubleClicked.connect(self._on_anno_clicked)
         self.chk_edit.stateChanged.connect(self._on_edit_mode_changed)
         self.image_label.box_drawn.connect(self._on_box_drawn)
@@ -940,6 +945,9 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             event.accept()
         elif key == QtCore.Qt.Key_S:
             self._save_annotation()
+            event.accept()
+        elif key == QtCore.Qt.Key_P:
+            self._save_frame_snapshot()
             event.accept()
         elif QtCore.Qt.Key_0 <= key <= QtCore.Qt.Key_9:
             digit = key - QtCore.Qt.Key_0
@@ -1383,6 +1391,10 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             self._show_blank()
             return
 
+        # Store the raw frame (heatmap or plain) before any viewer overlays.
+        # Used by _save_frame_snapshot() to produce export-quality output.
+        self._current_raw_frame = frame.copy()
+
         # Always fetch dets (needed for widget hit-testing even when overlay is off)
         dets = self.preds.for_frame(idx)
         style = self.cfg.overlay_style
@@ -1417,6 +1429,57 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             self.pause()
             return
         self.set_frame(nxt)
+
+    # ------------------------------------------------------------------
+    # Frame snapshot export
+    # ------------------------------------------------------------------
+
+    def _save_frame_snapshot(self) -> None:
+        """Export the current frame (with polished overlays) as PNG, SVG, or PDF."""
+        if self._current_raw_frame is None or self.preds is None:
+            self._status_bar.showMessage("No frame loaded — cannot save snapshot.")
+            return
+
+        # Derive a sensible default filename from the video stem
+        if self._annotation_path is not None:
+            stem = self._annotation_path.stem.removesuffix("_annotations")
+            default_dir = self._annotation_path.parent
+        else:
+            stem = "frame"
+            default_dir = Path.home()
+
+        default_name = f"{stem}_frame{self._current_frame:06d}.svg"
+
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save Frame Snapshot",
+            str(default_dir / default_name),
+            "SVG Vector (*.svg);;PDF Vector (*.pdf);;PNG Image (*.png)",
+        )
+        if not path:
+            return
+
+        out_path = Path(path)
+        dets = self.preds.for_frame(self._current_frame)
+        anno = self._annotations.get(str(self._current_frame))
+        style = self.cfg.overlay_style
+        style.class_names = resolve_class_names(self.preds.meta.get("class_names"))
+
+        try:
+            from trackviz.render.snapshot import save_snapshot
+            save_snapshot(
+                self._current_raw_frame,
+                dets,
+                anno,
+                self._current_frame,
+                style,
+                out_path,
+            )
+            self._status_bar.showMessage(f"Snapshot saved: {out_path.name}")
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self, "Save Failed", f"Failed to save snapshot:\n{exc}"
+            )
 
     # ------------------------------------------------------------------
     # Auto-load predictions
