@@ -1448,7 +1448,8 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             stem = "frame"
             default_dir = Path.home()
 
-        default_name = f"{stem}_frame{self._current_frame:06d}.svg"
+        heatmap_suffix = "_heatmap" if self.chk_heatmap.isChecked() else ""
+        default_name = f"{stem}_frame{self._current_frame:06d}{heatmap_suffix}.svg"
 
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
