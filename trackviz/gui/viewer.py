@@ -1340,22 +1340,34 @@ class TrackVizWindow(QtWidgets.QMainWindow):
                 del self.video._cache[oldest]
         if not frames:
             return None
-        # Use the current frame (newest) as reference so that past positions
-        # accumulate motion color, giving a history trail rather than lighting
-        # up the current position.
-        ref_gray = frames[-1]
-        h, w = ref_gray.shape
+        # Weighted inter-frame diff accumulation.
+        #
+        # Compute consecutive diffs: diff[i] = absdiff(frames[i], frames[i+1])
+        # for i in 0..N-2.  diff[0] is the oldest transition, diff[N-2] is the
+        # most recent.  We weight oldest transitions highest so that past
+        # positions accumulate the most heat and the current position never
+        # explicitly appears as a high-accumulation region.
+        #
+        # Weight scheme: oldest diff → weight N-1, newest diff → weight 1
+        # (linear ramp, integer weights to keep arithmetic in float32).
+        h, w = frames[0].shape
         accumulator = np.zeros((h, w), dtype=np.float32)
         threshold = 10
-        for i in range(len(frames) - 1):
-            diff = cv2.absdiff(ref_gray, frames[i])
+        n_diffs = len(frames) - 1
+        for i in range(n_diffs):
+            diff = cv2.absdiff(frames[i], frames[i + 1])
             _, mask = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
-            accumulator += mask
+            # Oldest diff (i=0) gets highest weight (n_diffs), newest gets 1
+            weight = n_diffs - i
+            accumulator += mask.astype(np.float32) * weight
         mx = accumulator.max()
-        acc_u8 = (accumulator * (255.0 / mx)).astype(np.uint8) if mx > 0 else np.zeros_like(ref_gray, dtype=np.uint8)
+        acc_u8 = (accumulator * (255.0 / mx)).astype(np.uint8) if mx > 0 else np.zeros((h, w), dtype=np.uint8)
         heatmap = cv2.applyColorMap(acc_u8, cv2.COLORMAP_HOT)
-        ref_bgr = cv2.cvtColor(ref_gray, cv2.COLOR_GRAY2BGR)
-        return cv2.addWeighted(ref_bgr, 0.6, heatmap, 0.4, 0)
+        # Use the current (newest) frame as the base image
+        ref_bgr = cv2.cvtColor(frames[-1], cv2.COLOR_GRAY2BGR)
+        motion_mask = (acc_u8 > 0).astype(np.float32)[:, :, np.newaxis]
+        blended = cv2.addWeighted(ref_bgr, 0.5, heatmap, 0.5, 0)
+        return (blended * motion_mask + ref_bgr * (1 - motion_mask)).astype(np.uint8)
 
     # ------------------------------------------------------------------
     # set_frame
