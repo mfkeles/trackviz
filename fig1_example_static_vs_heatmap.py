@@ -60,17 +60,16 @@ def generate_heatmap(cap: cv2.VideoCapture, idx: int) -> np.ndarray | None:
     if not gray_frames:
         return None
 
-    # Weighted inter-frame diff accumulation.
-    # Oldest transition gets highest weight → past positions accumulate most
-    # heat; current position never explicitly appears as high-accumulation.
-    h, w = gray_frames[0].shape
+    # Use the current frame (newest) as reference so past positions accumulate
+    # motion color — history trail, not current-position highlight.
+    ref_gray = gray_frames[-1]
+    h, w = ref_gray.shape
     accumulator = np.zeros((h, w), dtype=np.float32)
-    n_diffs = len(gray_frames) - 1
-    for i in range(n_diffs):
-        diff = cv2.absdiff(gray_frames[i], gray_frames[i + 1])
+
+    for g in gray_frames[:-1]:
+        diff = cv2.absdiff(ref_gray, g)
         _, mask = cv2.threshold(diff, THRESHOLD, 255, cv2.THRESH_BINARY)
-        weight = n_diffs - i  # oldest diff → highest weight
-        accumulator += mask.astype(np.float32) * weight
+        accumulator += mask
 
     mx     = accumulator.max()
     acc_u8 = (
@@ -80,8 +79,9 @@ def generate_heatmap(cap: cv2.VideoCapture, idx: int) -> np.ndarray | None:
     )
 
     heatmap = cv2.applyColorMap(acc_u8, cv2.COLORMAP_HOT)
-    ref_bgr = cv2.cvtColor(gray_frames[-1], cv2.COLOR_GRAY2BGR)
+    ref_bgr = cv2.cvtColor(ref_gray, cv2.COLOR_GRAY2BGR)
 
+    # Blend heatmap only where motion was detected; static pixels are unchanged.
     motion_mask = (acc_u8 > 0).astype(np.float32)[:, :, np.newaxis]
     blended     = cv2.addWeighted(ref_bgr, 1 - MOTION_ALPHA, heatmap, MOTION_ALPHA, 0)
     return (blended * motion_mask + ref_bgr * (1 - motion_mask)).astype(np.uint8)
