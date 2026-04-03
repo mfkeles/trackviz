@@ -1340,11 +1340,14 @@ class TrackVizWindow(QtWidgets.QMainWindow):
                 del self.video._cache[oldest]
         if not frames:
             return None
-        ref_gray = frames[0]
+        # Use the current frame (newest) as reference so that past positions
+        # accumulate motion color, giving a history trail rather than lighting
+        # up the current position.
+        ref_gray = frames[-1]
         h, w = ref_gray.shape
         accumulator = np.zeros((h, w), dtype=np.float32)
         threshold = 10
-        for i in range(1, len(frames)):
+        for i in range(len(frames) - 1):
             diff = cv2.absdiff(ref_gray, frames[i])
             _, mask = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
             accumulator += mask
