@@ -38,3 +38,8 @@ Thumbs.db
 
 # Hatch
 .hatch/
+
+# Claude Code local settings
+.claude/
+
+fig1_example_static_vs_heatmap.py
