@@ -2,9 +2,40 @@
 
 A Python package for **scrubbing, playing, and annotating** videos with model predictions (bboxes + track IDs + confidences) frame-by-frame.
 
-## Install (dev)
+## Install
 
-### Using Pip
+### Using uv (recommended)
+[uv](https://docs.astral.sh/uv/) handles the Python version, venv, and dependencies for you. Install uv once:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh    # macOS / Linux
+# Windows:  powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+**As a CLI tool (one-liner, recommended for end users):**
+
+```bash
+uv tool install git+https://github.com/mfkeles/trackviz.git
+```
+
+This installs `trackviz` into an isolated environment and puts the `trackviz` command on your PATH. Launch the viewer with:
+
+```bash
+trackviz gui
+```
+
+To update later: `uv tool upgrade trackviz`. To remove: `uv tool uninstall trackviz`.
+
+**From source (for development):**
+
+```bash
+git clone https://github.com/mfkeles/trackviz.git
+cd trackviz
+uv sync
+uv run trackviz gui
+```
+
+### Using pip
 ```bash
 pip install -e .
 ```
@@ -15,12 +46,20 @@ pip install -e .
 > conda install -c conda-forge opencv
 > ```
 
-### Using Conda (recommended on macOS)
+### Using conda (alternative on macOS)
 The conda-forge OpenCV build includes FFmpeg and handles AVI, MKV, and other formats correctly.
 ```bash
 conda create -n trackviz python=3.10 -y
 conda activate trackviz
 pip install -e .
+```
+
+### Optional: FFmpeg for video export
+The "Export Video" feature uses `ffmpeg` if it's on your PATH (H.264 with tunable CRF). Without it, export falls back to OpenCV's encoder, which works but produces larger files and has fewer codec options.
+
+```bash
+brew install ffmpeg      # macOS
+sudo apt install ffmpeg  # Debian/Ubuntu
 ```
 
 ## Quick start
@@ -97,6 +136,20 @@ All annotations are shown in the persistent sidebar list:
 | `S` | Save annotation for current frame |
 | `Space` | Play / Pause |
 | `←` / `→` | Step one frame back / forward |
+
+## Export video
+
+Click **Export Video…** (next to **Save Frame**) to render a segment of the current video to `.mp4` with overlays baked in.
+
+Options in the dialog:
+- **Output file** — auto-named from your settings (e.g. `myvideo_f0-36000_q8_s100_pa.mp4`). Edit freely or click **Browse…** to pick a path.
+- **Quality** — 1 (small file) to 10 (high quality). Maps to H.264 CRF 32–15 when FFmpeg is available.
+- **Output scale** — 0.1–1.0 multiplier of the source resolution.
+- **Frame range** — export a segment instead of the whole file.
+- **Include predictions** / **Include annotations** — toggle the green (model) and cyan (user-corrected) boxes independently. Uncheck both for a clean export.
+- **Render as motion heatmap** — bakes the same 6-frame motion heatmap used in the viewer into the output.
+
+Encoding runs in a background thread so the main viewer stays responsive; a progress bar shows frame-by-frame progress. Full-video exports longer than 20 minutes prompt for confirmation.
 
 ## Features for Long Videos
 
