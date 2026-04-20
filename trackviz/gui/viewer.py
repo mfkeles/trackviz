@@ -833,6 +833,9 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.btn_snapshot = QtWidgets.QPushButton("Save Frame  [P]")
         self.btn_snapshot.setObjectName("btnSnapshot")
         opts.addWidget(self.btn_snapshot)
+        self.btn_export_video = QtWidgets.QPushButton("Export Video…")
+        self.btn_export_video.setObjectName("btnExport")
+        opts.addWidget(self.btn_export_video)
         v.addLayout(opts)
 
         # Behavior / save row
@@ -906,6 +909,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.btn_label.clicked.connect(self._save_annotation)
         self.btn_delete_anno.clicked.connect(self._delete_annotation)
         self.btn_snapshot.clicked.connect(self._save_frame_snapshot)
+        self.btn_export_video.clicked.connect(self._on_export_video)
         self.list_annotations.itemDoubleClicked.connect(self._on_anno_clicked)
         self.chk_edit.stateChanged.connect(self._on_edit_mode_changed)
         self.image_label.box_drawn.connect(self._on_box_drawn)
@@ -1484,6 +1488,27 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(
                 self, "Save Failed", f"Failed to save snapshot:\n{exc}"
             )
+
+    # ------------------------------------------------------------------
+    # Video export
+    # ------------------------------------------------------------------
+
+    def _on_export_video(self) -> None:
+        if self.video is None or self.preds is None:
+            self._status_bar.showMessage("Load a video before exporting.")
+            return
+        self.pause()
+        from trackviz.gui.export_dialog import ExportDialog
+        dlg = ExportDialog(
+            video_path=Path(self.video.video_path),
+            preds=self.preds,
+            annotations=self._annotations,
+            max_frames=self.max_frames,
+            style=self.cfg.overlay_style,
+            fps=self.video.fps,
+            parent=self,
+        )
+        dlg.exec()
 
     # ------------------------------------------------------------------
     # Auto-load predictions

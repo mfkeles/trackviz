@@ -33,6 +33,69 @@ _MAX_CONSECUTIVE_FAILURES = 5
 
 
 # ---------------------------------------------------------------------------
+# Heatmap generator (rolling motion accumulator)
+# ---------------------------------------------------------------------------
+
+class _HeatmapGenerator:
+    """Produces a motion-heatmap overlay per frame.
+
+    Mirrors ``trackviz.gui.viewer._generate_heatmap`` so exported heatmap
+    videos match what the viewer shows on-screen.
+    """
+
+    def __init__(self, window_size: int = 6, threshold: int = 10) -> None:
+        self.window_size = window_size
+        self.threshold = threshold
+        self._buffer: List[np.ndarray] = []  # grayscale past frames
+
+    def prewarm_from_capture(
+        self, cap: "cv2.VideoCapture", start_frame: int
+    ) -> None:
+        """Fill the rolling buffer with the frames immediately preceding
+        *start_frame* so the first exported frame matches what the viewer
+        shows when you jump to that frame (the viewer reads its own window
+        on demand).
+
+        Leaves the capture positioned at *start_frame* on return.
+        """
+        n = self.window_size - 1
+        warm_start = max(0, start_frame - n)
+        if warm_start >= start_frame:
+            return
+        cap.set(cv2.CAP_PROP_POS_FRAMES, warm_start)
+        for _ in range(start_frame - warm_start):
+            ok, f = cap.read()
+            if not ok or f is None:
+                break
+            self.process(f)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+    def process(self, frame_bgr: np.ndarray) -> np.ndarray:
+        gray = (
+            cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+            if frame_bgr.ndim == 3
+            else frame_bgr
+        )
+        self._buffer.append(gray)
+        if len(self._buffer) > self.window_size:
+            self._buffer.pop(0)
+        ref = self._buffer[-1]
+        accumulator = np.zeros(ref.shape, dtype=np.float32)
+        for past in self._buffer[:-1]:
+            diff = cv2.absdiff(ref, past)
+            _, mask = cv2.threshold(diff, self.threshold, 255, cv2.THRESH_BINARY)
+            accumulator += mask
+        mx = accumulator.max()
+        if mx > 0:
+            acc_u8 = (accumulator * (255.0 / mx)).astype(np.uint8)
+        else:
+            acc_u8 = np.zeros_like(ref, dtype=np.uint8)
+        heatmap = cv2.applyColorMap(acc_u8, cv2.COLORMAP_HOT)
+        ref_bgr = cv2.cvtColor(ref, cv2.COLOR_GRAY2BGR)
+        return cv2.addWeighted(ref_bgr, 0.6, heatmap, 0.4, 0)
+
+
+# ---------------------------------------------------------------------------
 # Enhanced overlay drawing (export-only)
 # ---------------------------------------------------------------------------
 
@@ -182,6 +245,9 @@ def _export_via_ffmpeg(
     annotations: dict,
     quality: int,
     scale: float,
+    include_predictions: bool,
+    include_annotations: bool,
+    include_heatmap: bool,
     on_progress: Optional[Callable[[int, int], None]],
 ) -> None:
     crf = _crf_from_quality(quality)
@@ -208,6 +274,9 @@ def _export_via_ffmpeg(
         stderr=subprocess.DEVNULL,
     )
 
+    heatmap_gen = _HeatmapGenerator() if include_heatmap else None
+    if heatmap_gen is not None:
+        heatmap_gen.prewarm_from_capture(cap, start_frame)
     try:
         last_good: Optional[np.ndarray] = None
         consecutive_failures = 0
@@ -222,8 +291,11 @@ def _export_via_ffmpeg(
                 consecutive_failures += 1
                 if consecutive_failures > _MAX_CONSECUTIVE_FAILURES:
                     break
+            if heatmap_gen is not None:
+                raw = heatmap_gen.process(raw)
             frame = _render_frame(raw, start_frame + i, preds, style, annotations,
-                                   out_width, out_height, scale)
+                                   out_width, out_height, scale,
+                                   include_predictions, include_annotations)
             proc.stdin.write(frame.tobytes())
             if on_progress is not None:
                 on_progress(i + 1, n_frames)
@@ -248,6 +320,9 @@ def _export_via_opencv(
     annotations: dict,
     quality: int,
     scale: float,
+    include_predictions: bool,
+    include_annotations: bool,
+    include_heatmap: bool,
     on_progress: Optional[Callable[[int, int], None]],
 ) -> None:
     ext = output_path.suffix.lower()
@@ -263,6 +338,9 @@ def _export_via_opencv(
         raise RuntimeError(f"OpenCV VideoWriter could not open: {output_path}")
     writer.set(cv2.VIDEOWRITER_PROP_QUALITY, q_prop)
 
+    heatmap_gen = _HeatmapGenerator() if include_heatmap else None
+    if heatmap_gen is not None:
+        heatmap_gen.prewarm_from_capture(cap, start_frame)
     last_good: Optional[np.ndarray] = None
     consecutive_failures = 0
     for i in range(n_frames):
@@ -276,8 +354,11 @@ def _export_via_opencv(
             consecutive_failures += 1
             if consecutive_failures > _MAX_CONSECUTIVE_FAILURES:
                 break
+        if heatmap_gen is not None:
+            raw = heatmap_gen.process(raw)
         frame = _render_frame(raw, start_frame + i, preds, style, annotations,
-                               out_width, out_height, scale)
+                               out_width, out_height, scale,
+                               include_predictions, include_annotations)
         writer.write(frame)
         if on_progress is not None:
             on_progress(i + 1, n_frames)
@@ -327,30 +408,34 @@ def _render_frame(
     out_width: int,
     out_height: int,
     scale: float,
+    include_predictions: bool = True,
+    include_annotations: bool = True,
 ) -> np.ndarray:
     # Downscale first so overlays are drawn at output resolution
     if scale != 1.0:
         frame = cv2.resize(frame, (out_width, out_height), interpolation=cv2.INTER_AREA)
 
-    dets: List[Detection] = preds.for_frame(idx)
-    if scale != 1.0:
-        dets = [_scale_det(d, scale) for d in dets]
-    if dets:
-        frame = _draw_overlays_export(frame, dets, style, _COLOR_PREDICTION)
-
-    anno = annotations.get(str(idx))
-    if anno and anno.get("corrected") and "bbox" in anno:
-        bbox = anno["bbox"]
+    if include_predictions:
+        dets: List[Detection] = preds.for_frame(idx)
         if scale != 1.0:
-            bbox = [c * scale for c in bbox]
-        corr_det = Detection(
-            frame=idx,
-            bbox_xyxy=tuple(bbox),
-            cls=anno.get("cls"),
-            confidence=None,
-            track_id=None,
-        )
-        frame = _draw_overlays_export(frame, [corr_det], style, _COLOR_CORRECTION)
+            dets = [_scale_det(d, scale) for d in dets]
+        if dets:
+            frame = _draw_overlays_export(frame, dets, style, _COLOR_PREDICTION)
+
+    if include_annotations:
+        anno = annotations.get(str(idx))
+        if anno and anno.get("corrected") and "bbox" in anno:
+            bbox = anno["bbox"]
+            if scale != 1.0:
+                bbox = [c * scale for c in bbox]
+            corr_det = Detection(
+                frame=idx,
+                bbox_xyxy=tuple(bbox),
+                cls=anno.get("cls"),
+                confidence=None,
+                track_id=None,
+            )
+            frame = _draw_overlays_export(frame, [corr_det], style, _COLOR_CORRECTION)
 
     return frame
 
@@ -369,6 +454,9 @@ def export_video(
     annotations: Optional[dict] = None,
     quality: int = 8,
     scale: float = 1.0,
+    include_predictions: bool = True,
+    include_annotations: bool = True,
+    include_heatmap: bool = False,
     on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> None:
     """Render video frames with overlays and write to *output_path*.
@@ -389,6 +477,13 @@ def export_video(
                       0.5 halves width and height (quarter the pixel count).
                       H.264 requires even dimensions — values are rounded up to
                       the nearest even pixel automatically.
+        include_predictions:  Draw model prediction boxes (green).  Set False
+                      to omit them — e.g. for a clean export.
+        include_annotations:  Draw corrected annotation boxes (cyan).  Set
+                      False to omit them.
+        include_heatmap:  Replace each frame with a motion-heatmap overlay
+                      (same formula the viewer uses for its heatmap mode).
+                      Overlays still draw on top of the heatmap.
         on_progress:  Optional ``(frames_done, total_frames)`` callback.
     """
     if style is None:
@@ -437,6 +532,9 @@ def export_video(
         annotations=annotations,
         quality=quality,
         scale=scale,
+        include_predictions=include_predictions,
+        include_annotations=include_annotations,
+        include_heatmap=include_heatmap,
         on_progress=on_progress,
     )
 
