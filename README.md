@@ -4,15 +4,11 @@ A Python package for **scrubbing, playing, and annotating** videos with model pr
 
 ## Install
 
-### Using uv (recommended)
-[uv](https://docs.astral.sh/uv/) handles the Python version, venv, and dependencies for you. Install uv once:
+trackviz is installed with [uv](https://docs.astral.sh/uv/), which handles Python versions, venvs, and dependencies for you.
 
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh    # macOS / Linux
-# Windows:  powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
+> **Install uv first:** `curl -LsSf https://astral.sh/uv/install.sh | sh` (macOS / Linux) or `powershell -c "irm https://astral.sh/uv/install.ps1 | iex"` (Windows).
 
-**As a CLI tool (one-liner, recommended for end users):**
+**As a CLI tool (recommended for end users):**
 
 ```bash
 uv tool install git+https://github.com/mfkeles/trackviz.git
@@ -24,8 +20,6 @@ This installs `trackviz` into an isolated environment and puts the `trackviz` co
 trackviz gui
 ```
 
-To update later: `uv tool upgrade trackviz`. To remove: `uv tool uninstall trackviz`.
-
 **From source (for development):**
 
 ```bash
@@ -35,26 +29,20 @@ uv sync
 uv run trackviz gui
 ```
 
-### Using pip
+### Updating
+
+To pull in new changes from the repo:
+
 ```bash
-pip install -e .
+uv tool upgrade trackviz
 ```
 
-> **AVI / codec support:** `opencv-python` from PyPI ships without FFmpeg on some platforms (notably macOS), so AVI files may fail to open. If you hit `Couldn't read movie file`, replace the PyPI OpenCV with the conda-forge build:
-> ```bash
-> pip uninstall opencv-python
-> conda install -c conda-forge opencv
-> ```
+To remove: `uv tool uninstall trackviz`.
 
-### Using conda (alternative on macOS)
-The conda-forge OpenCV build includes FFmpeg and handles AVI, MKV, and other formats correctly.
-```bash
-conda create -n trackviz python=3.10 -y
-conda activate trackviz
-pip install -e .
-```
+(If you installed from source instead, run `git pull && uv sync` in your clone.)
 
 ### Optional: FFmpeg for video export
+
 The "Export Video" feature uses `ffmpeg` if it's on your PATH (H.264 with tunable CRF). Without it, export falls back to OpenCV's encoder, which works but produces larger files and has fewer codec options.
 
 ```bash
