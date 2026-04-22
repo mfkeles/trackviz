@@ -221,10 +221,12 @@ class ExportDialog(QtWidgets.QDialog):
 
         # Regenerate the default filename whenever a setting that's encoded
         # in it changes — unless the user has taken control of the path.
+        # Use valueChanged for the spins so arrow buttons / wheel / keyboard
+        # stepping (which don't emit editingFinished) still refresh the name.
         self.slider_quality.valueChanged.connect(self._maybe_refresh_filename)
         self.spin_scale.valueChanged.connect(self._maybe_refresh_filename)
-        self.spin_start.editingFinished.connect(self._maybe_refresh_filename)
-        self.spin_end.editingFinished.connect(self._maybe_refresh_filename)
+        self.spin_start.valueChanged.connect(self._maybe_refresh_filename)
+        self.spin_end.valueChanged.connect(self._maybe_refresh_filename)
         self.chk_predictions.toggled.connect(self._maybe_refresh_filename)
         self.chk_annotations.toggled.connect(self._maybe_refresh_filename)
         self.chk_heatmap.toggled.connect(self._maybe_refresh_filename)
@@ -325,6 +327,15 @@ class ExportDialog(QtWidgets.QDialog):
         return ret == QtWidgets.QMessageBox.Yes
 
     def _start_export(self) -> None:
+        # Commit any pending keystrokes in the spin boxes and regenerate the
+        # default filename, so clicking Start directly (without blurring the
+        # frame-range inputs first) still produces a name reflecting the
+        # current values.
+        self.spin_start.interpretText()
+        self.spin_end.interpretText()
+        self._sync_range()
+        self._maybe_refresh_filename()
+
         out_text = self.edit_output.text().strip()
         if not out_text:
             QtWidgets.QMessageBox.warning(
