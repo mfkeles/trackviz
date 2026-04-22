@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -815,6 +816,11 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.jump_btn.setFixedWidth(44)
         controls.addWidget(self.jump_box)
         controls.addWidget(self.jump_btn)
+
+        self.btn_scramble = QtWidgets.QPushButton("Scramble  [R]")
+        self.btn_scramble.setObjectName("btnJump")
+        self.btn_scramble.setToolTip("Jump to a random unlabeled frame")
+        controls.addWidget(self.btn_scramble)
         v.addLayout(controls)
 
         # Options row
@@ -883,7 +889,8 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.lbl_edit_hint = QtWidgets.QLabel(
             "0–7  select class  ·  S  save  ·  Del  delete annotation\n"
             "←/→  step  ·  Space  play/pause  ·  Esc  clear selection\n"
-            "P  save frame snapshot  ·  Edit Mode: click/drag a box, then S."
+            "P  save frame snapshot  ·  R  scramble to random unlabeled\n"
+            "Edit Mode: click/drag a box, then S."
         )
         self.lbl_edit_hint.setWordWrap(True)
         self.lbl_edit_hint.setStyleSheet("color: #555878; font-size: 11px;")
@@ -906,6 +913,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.chk_overlay.stateChanged.connect(lambda: self.set_frame(self._current_frame, force=True))
         self.chk_heatmap.stateChanged.connect(lambda: self.set_frame(self._current_frame, force=True))
         self.jump_btn.clicked.connect(lambda: self.set_frame(self.jump_box.value()))
+        self.btn_scramble.clicked.connect(self._scramble_to_unlabeled)
         self.btn_label.clicked.connect(self._save_annotation)
         self.btn_delete_anno.clicked.connect(self._delete_annotation)
         self.btn_snapshot.clicked.connect(self._save_frame_snapshot)
@@ -952,6 +960,9 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             event.accept()
         elif key == QtCore.Qt.Key_P:
             self._save_frame_snapshot()
+            event.accept()
+        elif key == QtCore.Qt.Key_R:
+            self._scramble_to_unlabeled()
             event.accept()
         elif QtCore.Qt.Key_0 <= key <= QtCore.Qt.Key_9:
             digit = key - QtCore.Qt.Key_0
@@ -1318,6 +1329,21 @@ class TrackVizWindow(QtWidgets.QMainWindow):
     def step(self, delta: int) -> None:
         self.pause()
         self.set_frame(self._current_frame + int(delta))
+
+    def _scramble_to_unlabeled(self) -> None:
+        if self.video is None or self.max_frames <= 0:
+            return
+        if len(self._annotations) >= self.max_frames:
+            self._status_bar.showMessage("All frames are labeled — nothing to scramble to.")
+            return
+        self.pause()
+        start = random.randrange(self.max_frames)
+        for offset in range(self.max_frames):
+            idx = (start + offset) % self.max_frames
+            if str(idx) not in self._annotations:
+                self.set_frame(idx)
+                self._status_bar.showMessage(f"Scrambled → frame {idx} (unlabeled)")
+                return
 
     # ------------------------------------------------------------------
     # Heatmap
