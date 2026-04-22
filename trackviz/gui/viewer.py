@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -719,7 +719,7 @@ class VideoReader:
 class ViewerConfig:
     start_paused: bool = True
     playback_fps: Optional[float] = None
-    overlay_style: OverlayStyle = OverlayStyle()
+    overlay_style: OverlayStyle = field(default_factory=OverlayStyle)
 
 
 # ---------------------------------------------------------------------------
