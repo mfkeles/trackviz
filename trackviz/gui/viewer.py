@@ -886,6 +886,40 @@ class TrackVizWindow(QtWidgets.QMainWindow):
 
         v_right.addWidget(_hsep())
 
+        lbl_counts_header = QtWidgets.QLabel("PER-CLASS COUNTS")
+        lbl_counts_header.setObjectName("sectionHeader")
+        v_right.addWidget(lbl_counts_header)
+
+        counts_grid = QtWidgets.QGridLayout()
+        counts_grid.setContentsMargins(0, 0, 0, 0)
+        counts_grid.setHorizontalSpacing(8)
+        counts_grid.setVerticalSpacing(2)
+        counts_grid.setColumnStretch(0, 1)
+        self._class_count_name_labels: List[QtWidgets.QLabel] = []
+        self._class_count_value_labels: List[QtWidgets.QLabel] = []
+        for i, name in enumerate(BEHAVIOR_NAMES):
+            name_lbl = QtWidgets.QLabel(f"{i}: {name}")
+            name_lbl.setStyleSheet("font-size: 11px;")
+            val_lbl = QtWidgets.QLabel("0")
+            val_lbl.setStyleSheet("font-size: 11px;")
+            val_lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            counts_grid.addWidget(name_lbl, i, 0)
+            counts_grid.addWidget(val_lbl, i, 1)
+            self._class_count_name_labels.append(name_lbl)
+            self._class_count_value_labels.append(val_lbl)
+
+        total_name_lbl = QtWidgets.QLabel("Total")
+        total_name_lbl.setStyleSheet("font-size: 11px; font-weight: bold;")
+        self.lbl_total_count = QtWidgets.QLabel("0")
+        self.lbl_total_count.setStyleSheet("font-size: 11px; font-weight: bold;")
+        self.lbl_total_count.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        total_row = len(BEHAVIOR_NAMES)
+        counts_grid.addWidget(total_name_lbl, total_row, 0)
+        counts_grid.addWidget(self.lbl_total_count, total_row, 1)
+        v_right.addLayout(counts_grid)
+
+        v_right.addWidget(_hsep())
+
         self.lbl_edit_hint = QtWidgets.QLabel(
             "0–7  select class  ·  S  save  ·  Del  delete annotation\n"
             "←/→  step  ·  Space  play/pause  ·  Esc  clear selection\n"
@@ -1213,6 +1247,25 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         else:
             self.lbl_saved_info.setText(f"Total: {count} | Current: none")
             self.lbl_saved_info.setStyleSheet("")
+
+        self._update_class_counts()
+
+    def _update_class_counts(self) -> None:
+        counts = [0] * len(self._class_count_value_labels)
+        for entry in self._annotations.values():
+            cls = self._anno_cls(entry)
+            if 0 <= cls < len(counts):
+                counts[cls] += 1
+        dim = "color: #555878;"
+        lit = "color: #b8bce0;"
+        for name_lbl, val_lbl, n in zip(
+            self._class_count_name_labels, self._class_count_value_labels, counts
+        ):
+            val_lbl.setText(str(n))
+            style = "font-size: 11px; " + (dim if n == 0 else lit)
+            name_lbl.setStyleSheet(style)
+            val_lbl.setStyleSheet(style)
+        self.lbl_total_count.setText(str(sum(counts)))
 
     def _on_anno_clicked(self, item) -> None:
         try:
