@@ -6,7 +6,11 @@ A Python package for **scrubbing, playing, and annotating** videos with model pr
 
 trackviz is installed with [uv](https://docs.astral.sh/uv/), which handles Python versions, venvs, and dependencies for you.
 
-> **Install uv first:** `curl -LsSf https://astral.sh/uv/install.sh | sh` (macOS / Linux) or `powershell -c "irm https://astral.sh/uv/install.ps1 | iex"` (Windows).
+**Install uv first:** 
+
+`curl -LsSf https://astral.sh/uv/install.sh | sh` (macOS / Linux) or 
+
+`powershell -c "irm https://astral.sh/uv/install.ps1 | iex"` (Windows).
 
 **As a CLI tool (recommended for end users):**
 
