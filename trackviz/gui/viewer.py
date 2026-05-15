@@ -1032,11 +1032,6 @@ class TrackVizWindow(QtWidgets.QMainWindow):
                 continue
             try:
                 self.load_from_video_path(p)
-            except SystemExit as e:
-                self._status_bar.showMessage(f"Error: {e}")
-                QtWidgets.QMessageBox.critical(self, "trackviz", str(e))
-                event.ignore()
-                return
             except Exception as e:
                 self._status_bar.showMessage(f"Error: {e}")
                 QtWidgets.QMessageBox.critical(self, "trackviz", f"Failed to load video/predictions:\n{e}")
@@ -1088,35 +1083,62 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             self.video.release()
         self.video = VideoReader(str(video_path))
         self.playback_fps = self.cfg.playback_fps or self.video.fps
-        self._status_bar.showMessage(f"Loading predictions for {video_path.name}…")
-        QtWidgets.QApplication.processEvents()
-        preds = self._autoload_predictions_for_video(video_path)
         self._annotation_path = video_path.parent / f"{video_path.stem}_annotations.json"
         self._load_annotations()
+
+        self._status_bar.showMessage(f"Loading predictions for {video_path.name}…")
+        QtWidgets.QApplication.processEvents()
+        preds: Optional[Predictions] = None
+        preds_error: Optional[str] = None
+        try:
+            preds = self._autoload_predictions_for_video(video_path)
+        except SystemExit as e:
+            preds_error = str(e)
+        except Exception as e:
+            preds_error = f"Failed to load predictions: {e}"
         self.preds = preds
+
         v_count = self.video.frame_count
-        p_count = self.preds.total_frames
-        if v_count > 0 and p_count > 0 and abs(v_count - p_count) > max(10, int(0.01 * v_count)):
-            print(
-                f"[trackviz] Warning: video has {v_count} frames but predictions cover "
-                f"{p_count} frames. Overlays may be misaligned."
-            )
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Frame count mismatch",
-                f"Video: {v_count} frames\nPredictions: {p_count} frames\n\n"
-                "Overlays may be misaligned.",
-            )
-        self.max_frames = v_count if v_count > 0 else p_count
+        if preds is not None:
+            p_count = preds.total_frames
+            if v_count > 0 and p_count > 0 and abs(v_count - p_count) > max(10, int(0.01 * v_count)):
+                print(
+                    f"[trackviz] Warning: video has {v_count} frames but predictions cover "
+                    f"{p_count} frames. Overlays may be misaligned."
+                )
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Frame count mismatch",
+                    f"Video: {v_count} frames\nPredictions: {p_count} frames\n\n"
+                    "Overlays may be misaligned.",
+                )
+            self.max_frames = v_count if v_count > 0 else p_count
+        else:
+            self.max_frames = v_count
+
         self.slider.blockSignals(True)
         self.slider.setMaximum(max(0, self.max_frames - 1))
         self.slider.setValue(0)
         self.slider.blockSignals(False)
         self.jump_box.setMaximum(max(0, self.max_frames - 1))
         self.set_frame(0)
-        self._status_bar.showMessage(
-            f"Loaded {video_path.name} — {self.max_frames} frames @ {self.video.fps:.1f} fps"
-        )
+
+        if preds_error is not None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "No Tracking Found",
+                f"{preds_error}\n\n"
+                "The video has been loaded without tracking overlays. "
+                "Export and snapshot still work on the raw video.",
+            )
+            self._status_bar.showMessage(
+                f"Loaded {video_path.name} — {self.max_frames} frames @ "
+                f"{self.video.fps:.1f} fps  (no tracking)"
+            )
+        else:
+            self._status_bar.showMessage(
+                f"Loaded {video_path.name} — {self.max_frames} frames @ {self.video.fps:.1f} fps"
+            )
 
     # ------------------------------------------------------------------
     # Annotations  (unified: class + bbox + corrected flag)
@@ -1446,7 +1468,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
 
     def set_frame(self, idx: int, force: bool = False) -> None:
         idx = int(idx)
-        if self.video is None or self.preds is None or self.max_frames <= 0:
+        if self.video is None or self.max_frames <= 0:
             self._current_frame = 0
             self.lbl_frame.setText("— / —")
             return
@@ -1482,11 +1504,14 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self._current_raw_frame = frame.copy()
 
         # Always fetch dets (needed for widget hit-testing even when overlay is off)
-        dets = self.preds.for_frame(idx)
         style = self.cfg.overlay_style
-        style.class_names = resolve_class_names(self.preds.meta.get("class_names"))
+        if self.preds is not None:
+            dets = self.preds.for_frame(idx)
+            style.class_names = resolve_class_names(self.preds.meta.get("class_names"))
+        else:
+            dets = []
 
-        if self.chk_overlay.isChecked():
+        if self.chk_overlay.isChecked() and dets:
             frame = draw_overlays(frame, dets, style, box_color=_COLOR_ORIGINAL)
 
         # Render corrected annotation bbox in cyan
@@ -1507,7 +1532,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self._update_annotation_list()
 
     def _on_tick(self) -> None:
-        if self.video is None or self.preds is None:
+        if self.video is None:
             self.pause()
             return
         nxt = self._current_frame + 1
@@ -1522,7 +1547,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
 
     def _save_frame_snapshot(self) -> None:
         """Export the current frame (with polished overlays) as PNG, SVG, or PDF."""
-        if self._current_raw_frame is None or self.preds is None:
+        if self._current_raw_frame is None:
             self._status_bar.showMessage("No frame loaded — cannot save snapshot.")
             return
 
@@ -1547,10 +1572,13 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             return
 
         out_path = Path(path)
-        dets = self.preds.for_frame(self._current_frame)
-        anno = self._annotations.get(str(self._current_frame))
         style = self.cfg.overlay_style
-        style.class_names = resolve_class_names(self.preds.meta.get("class_names"))
+        if self.preds is not None:
+            dets = self.preds.for_frame(self._current_frame)
+            style.class_names = resolve_class_names(self.preds.meta.get("class_names"))
+        else:
+            dets = []
+        anno = self._annotations.get(str(self._current_frame))
 
         try:
             from trackviz.render.snapshot import save_snapshot
@@ -1573,7 +1601,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_export_video(self) -> None:
-        if self.video is None or self.preds is None:
+        if self.video is None:
             self._status_bar.showMessage("Load a video before exporting.")
             return
         self.pause()

@@ -240,7 +240,7 @@ def _export_via_ffmpeg(
     out_height: int,
     start_frame: int,
     n_frames: int,
-    preds: Predictions,
+    preds: Optional[Predictions],
     style: OverlayStyle,
     annotations: dict,
     quality: int,
@@ -315,7 +315,7 @@ def _export_via_opencv(
     out_height: int,
     start_frame: int,
     n_frames: int,
-    preds: Predictions,
+    preds: Optional[Predictions],
     style: OverlayStyle,
     annotations: dict,
     quality: int,
@@ -402,7 +402,7 @@ def _scale_det(det: Detection, scale: float) -> Detection:
 def _render_frame(
     frame: np.ndarray,
     idx: int,
-    preds: Predictions,
+    preds: Optional[Predictions],
     style: OverlayStyle,
     annotations: dict,
     out_width: int,
@@ -415,7 +415,7 @@ def _render_frame(
     if scale != 1.0:
         frame = cv2.resize(frame, (out_width, out_height), interpolation=cv2.INTER_AREA)
 
-    if include_predictions:
+    if include_predictions and preds is not None:
         dets: List[Detection] = preds.for_frame(idx)
         if scale != 1.0:
             dets = [_scale_det(d, scale) for d in dets]
@@ -446,7 +446,7 @@ def _render_frame(
 
 def export_video(
     video_path: Path,
-    preds: Predictions,
+    preds: Optional[Predictions],
     output_path: Path,
     start_frame: int = 0,
     end_frame: Optional[int] = None,
@@ -491,8 +491,12 @@ def export_video(
     if annotations is None:
         annotations = {}
 
-    # Always resolve class names: replaces generic "cls0/cls1" with real names
-    style.class_names = resolve_class_names(preds.meta.get("class_names"))
+    if preds is None:
+        # No tracking available — drawing predictions is impossible.
+        include_predictions = False
+    else:
+        # Always resolve class names: replaces generic "cls0/cls1" with real names
+        style.class_names = resolve_class_names(preds.meta.get("class_names"))
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():

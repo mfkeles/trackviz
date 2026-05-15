@@ -91,7 +91,7 @@ class ExportDialog(QtWidgets.QDialog):
     def __init__(
         self,
         video_path: Path,
-        preds: Predictions,
+        preds: Optional[Predictions],
         annotations: dict,
         max_frames: int,
         style: OverlayStyle,
@@ -180,8 +180,14 @@ class ExportDialog(QtWidgets.QDialog):
         form.addRow("Frame range", range_row)
 
         # ── Overlays ────────────────────────────────────────────────
+        has_preds = preds is not None
         self.chk_predictions = QtWidgets.QCheckBox("Include predictions (green)")
-        self.chk_predictions.setChecked(True)
+        self.chk_predictions.setChecked(has_preds)
+        self.chk_predictions.setEnabled(has_preds)
+        if not has_preds:
+            self.chk_predictions.setToolTip(
+                "No tracking was found for this video — predictions cannot be drawn."
+            )
         self.chk_annotations = QtWidgets.QCheckBox("Include annotations (cyan)")
         self.chk_annotations.setChecked(True)
         self.chk_heatmap = QtWidgets.QCheckBox("Render as motion heatmap")
