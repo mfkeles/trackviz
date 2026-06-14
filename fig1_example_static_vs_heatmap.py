@@ -25,12 +25,12 @@ import cv2
 import numpy as np
 
 # ── Source files ──────────────────────────────────────────────────────────────
-DATA_DIR = Path("/Users/mehmetkeles/Desktop/heatmapTestData")
+DATA_DIR = Path("/Volumes/Lab_Files3/mfk/projects/2025_flyvista2/PE_Origins_Project/ClosedLoopArousal/Data/20260220")
 VIDEO    = DATA_DIR / "20260220_200000_raw.mp4"
 PKL      = DATA_DIR / "20260220_182213_yolo_fast.pkl"
 
 # ── Frame indices ─────────────────────────────────────────────────────────────
-FRAME_INDICES = [26127, 60784, 43635, 273810, 159465, 199325]
+FRAME_INDICES = [26127, 60784, 43635, 273807, 159465, 199325]
 
 # ── Heatmap settings ──────────────────────────────────────────────────────────
 WINDOW_SIZE   = 6    # number of frames in sliding window (inclusive of target)
