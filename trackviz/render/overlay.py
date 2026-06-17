@@ -69,6 +69,41 @@ def resolve_label_top(
     return top
 
 
+def place_label_top(
+    top_above: float,
+    top_inside: float,
+    height: float,
+    x1: float,
+    x2: float,
+    placed: List[LabelRect],
+    img_h: float,
+    *,
+    gap: float = 2.0,
+) -> float:
+    """Pick a non-overlapping, on-screen top-y for a label rectangle.
+
+    Prefers stacking the label *above* the box (growing upward from
+    *top_above*).  When the box hugs the top of the image there is no room to
+    stack upward, so this falls back to stacking *downward* from *top_inside*
+    (just inside the box's top edge).  Co-located labels then form a tidy stack
+    near the top-left corner instead of colliding at the image edge — the
+    failure mode when a frame has two low-confidence predictions for one
+    animal whose box reaches the top of the frame.
+
+    The chosen top is clamped into ``[0, img_h - height]``.  The caller appends
+    the final rectangle to *placed* so later labels stack against it.
+    """
+    above = resolve_label_top(
+        top_above, height, x1, x2, placed, push_down=False, gap=gap
+    )
+    if above >= 0.0:
+        return above
+    inside = resolve_label_top(
+        top_inside, height, x1, x2, placed, push_down=True, gap=gap
+    )
+    return max(0.0, min(float(img_h - height), inside))
+
+
 def draw_overlays(
     frame_bgr: np.ndarray,
     detections: List[Detection],
@@ -125,17 +160,17 @@ def draw_overlays(
             )
             label_h = text_h + baseline
 
-            # Prefer placing the label above the box; fall back below when the
-            # box hugs the top edge (where "above" would clip the text).
-            below = (y1 - 5 - text_h) < 0
-            rect_top = (y2 + 5) if below else (y1 - 5 - text_h)
-
-            # Stack against any label already drawn for this frame, then clamp
-            # back inside the image.
-            rect_top = resolve_label_top(
-                rect_top, label_h, x1, x1 + text_w, placed_labels, push_down=below
+            # Prefer above the box; if the box hugs the top edge, fall back to
+            # just inside it.  Stacks against labels already drawn this frame.
+            rect_top = place_label_top(
+                top_above=y1 - 5 - text_h,
+                top_inside=y1 + 5,
+                height=label_h,
+                x1=x1,
+                x2=x1 + text_w,
+                placed=placed_labels,
+                img_h=h,
             )
-            rect_top = max(0.0, min(float(h - label_h), rect_top))
             placed_labels.append((float(x1), rect_top, float(x1 + text_w), rect_top + label_h))
 
             # cv2.putText uses the y coordinate as the text baseline.
