@@ -15,11 +15,15 @@ import numpy as np
 
 from trackviz.io.predictions import Detection
 from trackviz.render.export import _COLOR_CORRECTION, _COLOR_PREDICTION, _draw_overlays_export
-from trackviz.render.overlay import OverlayStyle
+from trackviz.render.overlay import LabelRect, OverlayStyle, resolve_label_top
 
 # Hex equivalents of the BGR export colours (for matplotlib / SVG)
 _PRED_HEX = "#00ff00"
 _CORR_HEX = "#00c8ff"
+
+# Vector export renders at this DPI (see _save_vector); 1 data unit = 1 px.
+_VECTOR_DPI = 150
+_LABEL_FONTSIZE = 7
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +164,17 @@ def _draw_mpl_boxes(
 ) -> None:
     import matplotlib.patches as mpatches
 
+    # Approximate label-box size in pixel (data) units.  fontsize is in points;
+    # at _VECTOR_DPI one point spans dpi/72 px.  The factors leave room for the
+    # square bbox padding around the text.
+    px_per_pt = _VECTOR_DPI / 72.0
+    label_h = _LABEL_FONTSIZE * px_per_pt * 1.7
+    char_w = _LABEL_FONTSIZE * px_per_pt * 0.62
+
+    # Label rectangles already placed, so co-located detections (two
+    # low-confidence predictions for one animal) stack instead of overlapping.
+    placed_labels: List[LabelRect] = []
+
     for det in detections:
         x1, y1, x2, y2 = det.bbox_xyxy
         bw, bh = x2 - x1, y2 - y1
@@ -189,18 +204,31 @@ def _draw_mpl_boxes(
         if not label:
             continue
 
-        # Prefer label above the box; fall back below when near the top edge
-        if y1 > 20:
-            ty, va = y1 - 2, "bottom"
+        label_w = max(char_w, len(label) * char_w)
+
+        # Prefer label above the box; fall back below when near the top edge.
+        below = y1 <= 20
+        rect_top = y2 + 2 if below else (y1 - 2 - label_h)
+
+        # Stack against any label already placed for this frame.
+        rect_top = resolve_label_top(
+            rect_top, label_h, x1 + 2, x1 + 2 + label_w,
+            placed_labels, push_down=below,
+        )
+        placed_labels.append((x1 + 2, rect_top, x1 + 2 + label_w, rect_top + label_h))
+
+        # Anchor by the rectangle edge nearest the box so va matches the side.
+        if below:
+            ty, va = rect_top, "top"
         else:
-            ty, va = y2 + 2, "top"
+            ty, va = rect_top + label_h, "bottom"
 
         # bbox= adds a coloured rectangle behind the text — both the rect and
         # the <text> element are separate objects in the SVG/PDF, so colours
         # and content can be changed independently in Illustrator.
         ax.text(
             x1 + 2, ty, label,
-            fontsize=7,
+            fontsize=_LABEL_FONTSIZE,
             color="white",
             va=va,
             ha="left",

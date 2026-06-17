@@ -20,6 +20,55 @@ class OverlayStyle:
     class_names: Optional[List[str]] = None
 
 
+# Type alias for a placed-label rectangle in image space (x1, y1, x2, y2),
+# with y increasing downward.
+LabelRect = Tuple[float, float, float, float]
+
+
+def resolve_label_top(
+    top: float,
+    height: float,
+    x1: float,
+    x2: float,
+    placed: List[LabelRect],
+    *,
+    push_down: bool,
+    gap: float = 2.0,
+) -> float:
+    """Return a non-overlapping top-y for a label rectangle.
+
+    When two (or more) detections share almost the same bounding box — which
+    happens when the model is unsure and emits two low-confidence predictions
+    for one animal — their labels would otherwise be drawn on top of each
+    other and become unreadable.  This shifts the candidate rectangle away
+    from its box (downward if *push_down*, else upward) until it no longer
+    overlaps any rectangle already in *placed*.
+
+    The caller is responsible for appending the final (post-clamp) rectangle
+    to *placed* so subsequent labels stack against it.
+    """
+    bottom = top + height
+    moved = True
+    # Bounded iteration guards against pathological cascades.
+    for _ in range(len(placed) + 1):
+        if not moved:
+            break
+        moved = False
+        for px1, py1, px2, py2 in placed:
+            horizontal_overlap = x1 < px2 and x2 > px1
+            vertical_overlap = top < py2 and bottom > py1
+            if horizontal_overlap and vertical_overlap:
+                if push_down:
+                    shift = py2 - top + gap
+                else:
+                    shift = -(bottom - py1 + gap)
+                top += shift
+                bottom += shift
+                moved = True
+                break
+    return top
+
+
 def draw_overlays(
     frame_bgr: np.ndarray,
     detections: List[Detection],
@@ -39,6 +88,10 @@ def draw_overlays(
 
     out = frame_bgr.copy()
     h, w = out.shape[:2]
+
+    # Rectangles of labels already drawn on this frame, so co-located
+    # detections stack instead of overprinting one another.
+    placed_labels: List[LabelRect] = []
 
     for det in detections:
         x1, y1, x2, y2 = det.bbox_xyxy
@@ -70,16 +123,23 @@ def draw_overlays(
                 style.font_scale,
                 style.font_thickness,
             )
+            label_h = text_h + baseline
+
+            # Prefer placing the label above the box; fall back below when the
+            # box hugs the top edge (where "above" would clip the text).
+            below = (y1 - 5 - text_h) < 0
+            rect_top = (y2 + 5) if below else (y1 - 5 - text_h)
+
+            # Stack against any label already drawn for this frame, then clamp
+            # back inside the image.
+            rect_top = resolve_label_top(
+                rect_top, label_h, x1, x1 + text_w, placed_labels, push_down=below
+            )
+            rect_top = max(0.0, min(float(h - label_h), rect_top))
+            placed_labels.append((float(x1), rect_top, float(x1 + text_w), rect_top + label_h))
 
             # cv2.putText uses the y coordinate as the text baseline.
-            # If the bbox is near the top, "y1 - 5" can clip the text.
-            y_text = y1 - 5
-            min_baseline_y = text_h + baseline
-            if y_text < min_baseline_y:
-                # Prefer below the box; otherwise clamp inside the image.
-                y_text = min(h - 1, y2 + text_h + baseline + 5)
-                if y_text < min_baseline_y:
-                    y_text = min_baseline_y
+            y_text = int(round(rect_top + text_h))
             cv2.putText(
                 out,
                 label,
