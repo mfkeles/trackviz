@@ -12,7 +12,7 @@ import numpy as np
 
 from trackviz.io.class_names import resolve_class_names
 from trackviz.io.predictions import Detection, Predictions
-from trackviz.render.overlay import OverlayStyle
+from trackviz.render.overlay import LabelRect, OverlayStyle, resolve_label_top
 
 # BGR colours matching the viewer
 _COLOR_PREDICTION = (0, 255, 0)
@@ -115,6 +115,11 @@ def _draw_overlays_export(
     h, w = frame.shape[:2]
     class_names = style.class_names
 
+    # Label badges already drawn this frame, so co-located detections (two
+    # low-confidence predictions for the same animal) stack instead of
+    # overprinting one another.
+    placed_labels: List[LabelRect] = []
+
     for det in detections:
         x1, y1, x2, y2 = det.bbox_xyxy
         x1 = int(max(0, min(w - 1, round(x1))))
@@ -158,16 +163,20 @@ def _draw_overlays_export(
         badge_h = th + baseline + pad_y * 2
         badge_w = tw + pad_x * 2
 
-        # Prefer badge above the box; shift below if too close to top edge
-        by2 = y1
-        by1 = y1 - badge_h
-        if by1 < 0:
-            by1 = y2
-            by2 = y2 + badge_h
-        by1 = max(0, min(h - 1, by1))
-        by2 = max(0, min(h, by2))
+        # Prefer badge above the box; shift below if too close to top edge.
+        below = (y1 - badge_h) < 0
+        by1 = y2 if below else (y1 - badge_h)
         bx1 = max(0, x1)
         bx2 = min(w, x1 + badge_w)
+
+        # Stack against any badge already drawn for this frame, then clamp.
+        by1 = resolve_label_top(
+            float(by1), float(badge_h), float(bx1), float(bx2),
+            placed_labels, push_down=below,
+        )
+        by1 = int(max(0, min(h - badge_h, round(by1))))
+        by2 = by1 + badge_h
+        placed_labels.append((float(bx1), float(by1), float(bx2), float(by2)))
 
         if by2 <= by1 or bx2 <= bx1:
             continue
