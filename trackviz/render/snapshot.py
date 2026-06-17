@@ -15,7 +15,7 @@ import numpy as np
 
 from trackviz.io.predictions import Detection
 from trackviz.render.export import _COLOR_CORRECTION, _COLOR_PREDICTION, _draw_overlays_export
-from trackviz.render.overlay import LabelRect, OverlayStyle, resolve_label_top
+from trackviz.render.overlay import LabelRect, OverlayStyle, place_label_top
 
 # Hex equivalents of the BGR export colours (for matplotlib / SVG)
 _PRED_HEX = "#00ff00"
@@ -206,22 +206,22 @@ def _draw_mpl_boxes(
 
         label_w = max(char_w, len(label) * char_w)
 
-        # Prefer label above the box; fall back below when near the top edge.
-        below = y1 <= 20
-        rect_top = y2 + 2 if below else (y1 - 2 - label_h)
-
-        # Stack against any label already placed for this frame.
-        rect_top = resolve_label_top(
-            rect_top, label_h, x1 + 2, x1 + 2 + label_w,
-            placed_labels, push_down=below,
+        # Prefer the label above the box; if the box hugs the top edge, fall
+        # back to just inside it.  Stacks against labels already placed.
+        rect_top = place_label_top(
+            top_above=y1 - 2 - label_h,
+            top_inside=y1 + 2,
+            height=label_h,
+            x1=x1 + 2,
+            x2=x1 + 2 + label_w,
+            placed=placed_labels,
+            img_h=img_h,
         )
         placed_labels.append((x1 + 2, rect_top, x1 + 2 + label_w, rect_top + label_h))
 
-        # Anchor by the rectangle edge nearest the box so va matches the side.
-        if below:
-            ty, va = rect_top, "top"
-        else:
-            ty, va = rect_top + label_h, "bottom"
+        # Anchor at the rectangle's top edge (matplotlib y increases downward in
+        # this axes, matching image convention).
+        ty, va = rect_top, "top"
 
         # bbox= adds a coloured rectangle behind the text — both the rect and
         # the <text> element are separate objects in the SVG/PDF, so colours
