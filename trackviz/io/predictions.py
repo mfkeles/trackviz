@@ -6,6 +6,8 @@ from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 
+from trackviz.io.class_names import BEHAVIOR_NAMES
+
 
 @dataclass(frozen=True)
 class Detection:
@@ -287,7 +289,7 @@ class Predictions:
             meta={
                 "source": "results_npy",
                 "path": str(path),
-                "class_names": ["ProbPumping", "Moving", "Grooming", "Feeding", "Quiescent"],
+                "class_names": list(BEHAVIOR_NAMES),
             },
         )
 
@@ -349,7 +351,7 @@ class Predictions:
             meta={
                 "source": "yolo_pickle", 
                 "path": str(path),
-                "class_names": ["ProbPumping", "Moving", "Grooming", "Feeding", "Quiescent", "HaltereSwitch"]
+                "class_names": list(BEHAVIOR_NAMES)
             }
         )
 

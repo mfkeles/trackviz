@@ -6,6 +6,27 @@ from typing import Optional
 from trackviz.io.predictions import Predictions
 
 
+def _match_video_pkl(cands: list, stem: str, run_id: str) -> Optional[Path]:
+    """Choose the prediction pickle that belongs to a specific video.
+
+    Detection/tracking files are named after their source video with an extra
+    run suffix inserted, e.g. ``<video_stem>_ultra_<timestamp>_tracking.pkl``.
+    The matching file is therefore the one whose stem *begins with the full
+    video stem* (preferred) or the ``_raw``-stripped run id. Matching on the
+    whole stem — instead of a single leading token — keeps sibling videos that
+    share a prefix (``copy_…``) from colliding. ``cands`` order is preserved, so
+    when one video has several prediction files the earlier (higher-priority)
+    one wins.
+    """
+    for prefix in (stem, run_id):
+        if not prefix:
+            continue
+        matches = [p for p in cands if p.stem.startswith(prefix)]
+        if matches:
+            return matches[0]
+    return None
+
+
 def autoload_predictions(
     video_path: Path,
     total_frames: Optional[int] = None,
@@ -101,10 +122,7 @@ def autoload_predictions(
         if len(possible_pkls) == 1:
             yolo_pkl = possible_pkls[0]
         elif len(possible_pkls) > 1:
-            date_part = run_id.split("_")[0]
-            matches = [p for p in possible_pkls if p.stem.startswith(date_part)]
-            if len(matches) == 1:
-                yolo_pkl = matches[0]
+            yolo_pkl = _match_video_pkl(possible_pkls, stem, run_id)
 
     if yolo_pkl:
         return Predictions.from_yolo_pickle(
