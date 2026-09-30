@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -12,7 +12,9 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from trackviz.io.auto import autoload_predictions
 from trackviz.io.class_names import BEHAVIOR_NAMES, resolve_class_names
+from trackviz.io.labels import Label, LabelFile, LabelFileError, read_labels, write_labels
 from trackviz.io.predictions import Detection, Predictions
+from trackviz.io.project import Project, ProjectError, load_project, write_project_template
 from trackviz.render.overlay import OverlayStyle, draw_overlays
 
 # BGR colors
@@ -729,15 +731,26 @@ class ViewerConfig:
 class TrackVizWindow(QtWidgets.QMainWindow):
     """Main application window.
 
-    Annotation model (single source of truth)
-    ------------------------------------------
+    Two modes share one window:
+
+    * Visualization / fine-tuning (default, ``project is None``): the built-in
+      fly classes (:data:`BEHAVIOR_NAMES`); annotations saved to
+      ``<video_stem>_annotations.json``.
+    * Labeling (a :class:`Project` is open): the project's classes; labels
+      saved by class key to ``<video_stem>_<project>_labels.json``.  Every
+      label needs a box.
+
+    Annotation model (single source of truth, both modes)
+    -----------------------------------------------------
     _annotations: Dict[str, dict]
         key   = str(frame_index)
         value = {"cls": int, "bbox": [x1,y1,x2,y2], "corrected": bool}
 
+    ``cls`` indexes the active class list (``self._class_names``).  In labeling
+    mode it is translated to/from the project's stable class keys on load/save.
+
     * corrected=False  → bbox is the model's prediction (auto-filled)
     * corrected=True   → bbox was manually drawn/moved/resized by the user
-    Saved to  <video_stem>_annotations.json
     """
 
     def __init__(
@@ -745,6 +758,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         video_path: Optional[str] = None,
         preds: Optional[Predictions] = None,
         config: Optional[ViewerConfig] = None,
+        project: Optional[Project] = None,
     ):
         super().__init__()
         self.setWindowTitle("trackviz")
@@ -850,8 +864,6 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         lbl_behavior = QtWidgets.QLabel("Behavior")
         lbl_behavior.setObjectName("sectionHeader")
         self.combo_classes = QtWidgets.QComboBox()
-        self.behavior_names = [f"{i}: {n}" for i, n in enumerate(BEHAVIOR_NAMES)]
-        self.combo_classes.addItems(self.behavior_names)
         self.combo_classes.setMinimumWidth(160)
         self.btn_label = QtWidgets.QPushButton("Save  [S]")
         self.btn_label.setObjectName("btnLabel")
@@ -890,51 +902,42 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         lbl_counts_header.setObjectName("sectionHeader")
         v_right.addWidget(lbl_counts_header)
 
-        counts_grid = QtWidgets.QGridLayout()
-        counts_grid.setContentsMargins(0, 0, 0, 0)
-        counts_grid.setHorizontalSpacing(8)
-        counts_grid.setVerticalSpacing(2)
-        counts_grid.setColumnStretch(0, 1)
+        # Rows are (re)built by _apply_class_set() whenever the class set changes.
+        self._counts_container = QtWidgets.QWidget()
+        self._counts_grid = QtWidgets.QGridLayout(self._counts_container)
+        self._counts_grid.setContentsMargins(0, 0, 0, 0)
+        self._counts_grid.setHorizontalSpacing(8)
+        self._counts_grid.setVerticalSpacing(2)
+        self._counts_grid.setColumnStretch(0, 1)
         self._class_count_name_labels: List[QtWidgets.QLabel] = []
         self._class_count_value_labels: List[QtWidgets.QLabel] = []
-        for i, name in enumerate(BEHAVIOR_NAMES):
-            name_lbl = QtWidgets.QLabel(f"{i}: {name}")
-            name_lbl.setStyleSheet("font-size: 11px;")
-            val_lbl = QtWidgets.QLabel("0")
-            val_lbl.setStyleSheet("font-size: 11px;")
-            val_lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-            counts_grid.addWidget(name_lbl, i, 0)
-            counts_grid.addWidget(val_lbl, i, 1)
-            self._class_count_name_labels.append(name_lbl)
-            self._class_count_value_labels.append(val_lbl)
-
-        total_name_lbl = QtWidgets.QLabel("Total")
-        total_name_lbl.setStyleSheet("font-size: 11px; font-weight: bold;")
         self.lbl_total_count = QtWidgets.QLabel("0")
-        self.lbl_total_count.setStyleSheet("font-size: 11px; font-weight: bold;")
-        self.lbl_total_count.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-        total_row = len(BEHAVIOR_NAMES)
-        counts_grid.addWidget(total_name_lbl, total_row, 0)
-        counts_grid.addWidget(self.lbl_total_count, total_row, 1)
-        v_right.addLayout(counts_grid)
+        v_right.addWidget(self._counts_container)
 
         v_right.addWidget(_hsep())
 
-        self.lbl_edit_hint = QtWidgets.QLabel(
-            "0–7  select class  ·  S  save  ·  Del  delete annotation\n"
-            "←/→  step  ·  Space  play/pause  ·  Esc  clear selection\n"
-            "P  save frame snapshot  ·  R  scramble to random unlabeled\n"
-            "Edit Mode: click/drag a box, then S."
-        )
+        self.lbl_edit_hint = QtWidgets.QLabel()
         self.lbl_edit_hint.setWordWrap(True)
         self.lbl_edit_hint.setStyleSheet("color: #555878; font-size: 11px;")
         v_right.addWidget(self.lbl_edit_hint)
 
+        # ── Menu ──────────────────────────────────────────────────────
+        file_menu = self.menuBar().addMenu("&File")
+        act_open_project = file_menu.addAction("Open Project…")
+        act_open_project.triggered.connect(self._on_open_project)
+        act_new_project = file_menu.addAction("New Project…")
+        act_new_project.triggered.connect(self._on_new_project)
+        self.act_close_project = file_menu.addAction("Close Project")
+        self.act_close_project.triggered.connect(lambda: self.set_project(None))
+
         # ── State ─────────────────────────────────────────────────────
+        self.project: Optional[Project] = None
+        self._class_names: List[str] = []
         self._playing = False
         self._current_frame = 0
         self._annotations: Dict[str, dict] = {}
         self._annotation_path: Optional[Path] = None
+        self._label_file = LabelFile()  # labeling mode: on-disk labels (keeps class-name snapshot)
         self._current_raw_frame: Optional[np.ndarray] = None
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._on_tick)
@@ -961,11 +964,152 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self._status_bar = self.statusBar()
         self._status_bar.showMessage("Ready — drag a video file to load.")
 
+        self._apply_class_set()
+        if project is not None:
+            self.set_project(project)
+
         self._show_blank()
         if video_path is not None and preds is not None:
             self.load_video_and_predictions(video_path, preds)
             if not self.cfg.start_paused:
                 self.play()
+
+    # ------------------------------------------------------------------
+    # Mode / class set
+    # ------------------------------------------------------------------
+
+    def set_project(self, project: Optional[Project]) -> None:
+        """Switch to labeling mode for *project*, or back to the default mode with ``None``."""
+        previous = self.project
+        self.project = project
+        if self.video is not None:
+            video_path = Path(self.video.video_path)
+            self._annotation_path = self._annotation_path_for(video_path)
+            if not self._load_annotations():
+                # Reassignment cancelled — stay in the previous mode.
+                self.project = previous
+                self._annotation_path = self._annotation_path_for(video_path)
+                self._load_annotations()
+                return
+        self._apply_class_set()
+        if project is not None:
+            self.chk_edit.setChecked(True)
+        if self.video is not None:
+            self.set_frame(self._current_frame, force=True)
+        self._status_bar.showMessage(
+            f"Labeling mode — project '{project.name}' ({len(project.classes)} classes)"
+            if project is not None else "Visualization mode"
+        )
+
+    def _apply_class_set(self) -> None:
+        """Rebuild the class dropdown, count rows, hint and title for the active mode."""
+        if self.project is not None:
+            self._class_names = self.project.names
+            hotkeys = [c.hotkey for c in self.project.classes]
+            self.setWindowTitle(f"trackviz — labeling: {self.project.name}")
+        else:
+            self._class_names = list(BEHAVIOR_NAMES)
+            hotkeys = [i if i <= 9 else None for i in range(len(self._class_names))]
+            self.setWindowTitle("trackviz")
+        self.act_close_project.setEnabled(self.project is not None)
+
+        self.behavior_names = [
+            f"{h}: {n}" if h is not None else f"–: {n}" for h, n in zip(hotkeys, self._class_names)
+        ]
+        self.combo_classes.blockSignals(True)
+        self.combo_classes.clear()
+        for i, text in enumerate(self.behavior_names):
+            self.combo_classes.addItem(text)
+            color = self._class_bgr(i)
+            if color is not None:
+                b, g, r = color
+                pix = QtGui.QPixmap(12, 12)
+                pix.fill(QtGui.QColor(r, g, b))
+                self.combo_classes.setItemIcon(i, QtGui.QIcon(pix))
+        self.combo_classes.blockSignals(False)
+
+        # Per-class count rows
+        while self._counts_grid.count():
+            w = self._counts_grid.takeAt(0).widget()
+            if w is not None and w is not self.lbl_total_count:
+                w.deleteLater()
+        self._class_count_name_labels = []
+        self._class_count_value_labels = []
+        for i, text in enumerate(self.behavior_names):
+            name_lbl = QtWidgets.QLabel(text)
+            name_lbl.setStyleSheet("font-size: 11px;")
+            val_lbl = QtWidgets.QLabel("0")
+            val_lbl.setStyleSheet("font-size: 11px;")
+            val_lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            self._counts_grid.addWidget(name_lbl, i, 0)
+            self._counts_grid.addWidget(val_lbl, i, 1)
+            self._class_count_name_labels.append(name_lbl)
+            self._class_count_value_labels.append(val_lbl)
+        total_name_lbl = QtWidgets.QLabel("Total")
+        total_name_lbl.setStyleSheet("font-size: 11px; font-weight: bold;")
+        self.lbl_total_count.setStyleSheet("font-size: 11px; font-weight: bold;")
+        self.lbl_total_count.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        self._counts_grid.addWidget(total_name_lbl, len(self.behavior_names), 0)
+        self._counts_grid.addWidget(self.lbl_total_count, len(self.behavior_names), 1)
+
+        digits = sorted(h for h in hotkeys if h is not None)
+        key_range = f"{digits[0]}–{digits[-1]}" if len(digits) > 1 else (str(digits[0]) if digits else "—")
+        edit_hint = ("Every label needs a box: draw or select one, then S."
+                     if self.project is not None else "Edit Mode: click/drag a box, then S.")
+        self.lbl_edit_hint.setText(
+            f"{key_range}  select class  ·  S  save  ·  Del  delete annotation\n"
+            "←/→  step  ·  Space  play/pause  ·  Esc  clear selection\n"
+            "P  save frame snapshot  ·  R  scramble to random unlabeled\n"
+            + edit_hint
+        )
+        self._update_annotation_list()
+
+    def _class_bgr(self, idx: Optional[int]) -> Optional[Tuple[int, int, int]]:
+        """Per-class box color in labeling mode; ``None`` in the default mode."""
+        if self.project is None or idx is None or not 0 <= idx < len(self.project.classes):
+            return None
+        return self.project.classes[idx].bgr
+
+    def _class_index_for_digit(self, digit: int) -> Optional[int]:
+        if self.project is not None:
+            return self.project.index_for_hotkey(digit)
+        return digit if digit < self.combo_classes.count() else None
+
+    def _on_open_project(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Open Labeling Project", str(self._dialog_dir()), "Project (*.yaml *.yml)"
+        )
+        if not path:
+            return
+        try:
+            project = load_project(path)
+        except ProjectError as e:
+            QtWidgets.QMessageBox.critical(self, "Invalid project", str(e))
+            return
+        self.set_project(project)
+
+    def _on_new_project(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "New Labeling Project", str(self._dialog_dir() / "my_project.yaml"),
+            "Project (*.yaml *.yml)",
+        )
+        if not path:
+            return
+        try:
+            written = write_project_template(Path(path))
+        except (ProjectError, OSError) as e:
+            QtWidgets.QMessageBox.critical(self, "Could not create project", str(e))
+            return
+        QtWidgets.QMessageBox.information(
+            self, "Project created",
+            f"Created {written}.\n\nEdit the class list in a text editor, then open it "
+            "with File → Open Project….",
+        )
+
+    def _dialog_dir(self) -> Path:
+        if self.video is not None:
+            return Path(self.video.video_path).parent
+        return Path.home()
 
     # ------------------------------------------------------------------
     # Key / close events
@@ -999,10 +1143,10 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             self._scramble_to_unlabeled()
             event.accept()
         elif QtCore.Qt.Key_0 <= key <= QtCore.Qt.Key_9:
-            digit = key - QtCore.Qt.Key_0
-            if digit < self.combo_classes.count():
-                self.combo_classes.setCurrentIndex(digit)
-                self._status_bar.showMessage(f"Class → {self.behavior_names[digit]}")
+            cls_idx = self._class_index_for_digit(key - QtCore.Qt.Key_0)
+            if cls_idx is not None:
+                self.combo_classes.setCurrentIndex(cls_idx)
+                self._status_bar.showMessage(f"Class → {self.behavior_names[cls_idx]}")
             event.accept()
         else:
             super().keyPressEvent(event)
@@ -1045,6 +1189,19 @@ class TrackVizWindow(QtWidgets.QMainWindow):
     # Blank / load
     # ------------------------------------------------------------------
 
+    def _unload_video(self) -> None:
+        if self.video is not None:
+            self.video.release()
+        self.video = None
+        self.preds = None
+        self.max_frames = 0
+        self._annotation_path = None
+        self._annotations = {}
+        self._update_annotation_list()
+        self._show_blank()
+        self.set_frame(0)
+        self._status_bar.showMessage("Video not loaded — labels need their classes reassigned first.")
+
     def _show_blank(self) -> None:
         blank = np.zeros((360, 640, 3), dtype=np.uint8)
         qimg = _bgr_to_qimage(blank)
@@ -1059,9 +1216,10 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.video = VideoReader(video_path)
         self.preds = preds
         self.playback_fps = self.cfg.playback_fps or self.video.fps
-        v_path = Path(video_path)
-        self._annotation_path = v_path.parent / f"{v_path.stem}_annotations.json"
-        self._load_annotations()
+        self._annotation_path = self._annotation_path_for(Path(video_path))
+        if not self._load_annotations():
+            self._unload_video()
+            return
         self.max_frames = min(self.video.frame_count or self.preds.total_frames, self.preds.total_frames)
         if self.max_frames <= 0:
             self.max_frames = self.preds.total_frames
@@ -1083,8 +1241,10 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             self.video.release()
         self.video = VideoReader(str(video_path))
         self.playback_fps = self.cfg.playback_fps or self.video.fps
-        self._annotation_path = video_path.parent / f"{video_path.stem}_annotations.json"
-        self._load_annotations()
+        self._annotation_path = self._annotation_path_for(video_path)
+        if not self._load_annotations():
+            self._unload_video()
+            return
 
         self._status_bar.showMessage(f"Loading predictions for {video_path.name}…")
         QtWidgets.QApplication.processEvents()
@@ -1123,7 +1283,8 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self.jump_box.setMaximum(max(0, self.max_frames - 1))
         self.set_frame(0)
 
-        if preds_error is not None:
+        if preds_error is not None and self.project is None:
+            # Labeling mode doesn't need predictions, so only the status bar mentions it.
             QtWidgets.QMessageBox.warning(
                 self,
                 "No Tracking Found",
@@ -1131,6 +1292,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
                 "The video has been loaded without tracking overlays. "
                 "Export and snapshot still work on the raw video.",
             )
+        if preds_error is not None:
             self._status_bar.showMessage(
                 f"Loaded {video_path.name} — {self.max_frames} frames @ "
                 f"{self.video.fps:.1f} fps  (no tracking)"
@@ -1150,16 +1312,28 @@ class TrackVizWindow(QtWidgets.QMainWindow):
 
         cls_idx = self.combo_classes.currentIndex()
 
-        # bbox source priority: pending edit → first model prediction → None
+        # bbox source priority: pending edit → [labeling: existing label] → first model prediction
         pending_bbox, _, _ = self.image_label.get_pending()
         corrected = pending_bbox is not None
 
         bbox = pending_bbox
+        existing = self._annotations.get(str(self._current_frame))
+        if bbox is None and self.project is not None and existing and "bbox" in existing:
+            bbox = list(existing["bbox"])  # re-class a labeled frame without redrawing
+            corrected = True
         if bbox is None and self.preds is not None:
             dets = self.preds.for_frame(self._current_frame)
             if dets:
                 b = dets[0].bbox_xyxy
                 bbox = [float(b[0]), float(b[1]), float(b[2]), float(b[3])]
+
+        if bbox is None and self.project is not None:
+            self._status_bar.showMessage(
+                "No box on this frame — draw one (Edit Mode) before saving the label."
+            )
+            if not self.chk_edit.isChecked():
+                self.chk_edit.setChecked(True)
+            return
 
         entry: dict = {"cls": cls_idx, "corrected": corrected}
         if bbox is not None:
@@ -1169,17 +1343,122 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         if corrected:
             self.image_label.clear_pending()
 
-        with open(self._annotation_path, "w") as f:
-            json.dump(self._annotations, f, indent=2)
+        if not self._write_annotations():
+            return
 
         self._update_annotation_list()
         self.set_frame(self._current_frame, force=True)
+        box_note = ""
+        if self.project is None:
+            box_note = "  [corrected box]" if corrected else "  [predicted box]"
         self._status_bar.showMessage(
-            f"Saved frame {self._current_frame}: {self.behavior_names[cls_idx]}"
-            + ("  [corrected box]" if corrected else "  [predicted box]")
+            f"Saved frame {self._current_frame}: {self.behavior_names[cls_idx]}{box_note}"
         )
 
-    def _load_annotations(self) -> None:
+    def _annotation_path_for(self, video_path: Path) -> Path:
+        if self.project is not None:
+            return self.project.labels_path(video_path)
+        return video_path.parent / f"{video_path.stem}_annotations.json"
+
+    def _write_annotations(self) -> bool:
+        """Persist ``self._annotations`` to the mode's file.  Returns False on failure."""
+        if self._annotation_path is None:
+            return False
+        try:
+            if self.project is not None:
+                label_file = self._label_file
+                label_file.labels = {
+                    int(k): Label(self.project.classes[e["cls"]].key, list(e["bbox"]))
+                    for k, e in self._annotations.items()
+                }
+                video_name = Path(self.video.video_path).name if self.video else None
+                write_labels(self._annotation_path, label_file, self.project, video_name)
+            else:
+                with open(self._annotation_path, "w") as f:
+                    json.dump(self._annotations, f, indent=2)
+        except OSError as e:
+            QtWidgets.QMessageBox.critical(self, "Save failed", f"Could not write labels:\n{e}")
+            return False
+        return True
+
+    def _load_annotations(self) -> bool:
+        """Load the active mode's annotation file into ``self._annotations``.
+
+        Returns False only when labeling-mode labels reference classes missing
+        from the project and the user cancels the reassignment.
+        """
+        if self.project is not None:
+            return self._load_project_labels()
+        self._load_default_annotations()
+        return True
+
+    def _load_project_labels(self) -> bool:
+        self._annotations = {}
+        try:
+            label_file = read_labels(self._annotation_path)
+        except LabelFileError as e:
+            QtWidgets.QMessageBox.critical(self, "Could not read labels", str(e))
+            return False
+
+        unknown = label_file.unknown_classes(self.project)
+        if unknown:
+            mapping = self._ask_class_reassignment(unknown, label_file.class_names)
+            if mapping is None:
+                return False
+            backup = self._annotation_path.with_name(self._annotation_path.name + ".bak")
+            try:
+                backup.write_bytes(self._annotation_path.read_bytes())
+                label_file.reassign(mapping)
+                video_name = Path(self.video.video_path).name if self.video else None
+                write_labels(self._annotation_path, label_file, self.project, video_name)
+            except OSError as e:
+                QtWidgets.QMessageBox.critical(self, "Save failed", f"Could not update labels:\n{e}")
+                return False
+            self._status_bar.showMessage(
+                f"Reassigned {sum(unknown.values())} labels — previous file kept as {backup.name}"
+            )
+
+        self._label_file = label_file
+        for frame, lab in label_file.labels.items():
+            self._annotations[str(frame)] = {
+                "cls": self.project.index_of(lab.cls), "bbox": list(lab.bbox), "corrected": True,
+            }
+        self._update_annotation_list()
+        return True
+
+    def _ask_class_reassignment(
+        self, unknown: Dict[str, int], old_names: Dict[str, str]
+    ) -> Optional[Dict[str, str]]:
+        """Force the user to map each class missing from the project onto an existing one."""
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Reassign labels")
+        layout = QtWidgets.QVBoxLayout(dlg)
+        msg = QtWidgets.QLabel(
+            f"{self._annotation_path.name} has labels for classes that are not in project "
+            f"'{self.project.name}'.\nChoose a class for each before continuing. "
+            "A backup of the file is kept (.bak)."
+        )
+        msg.setWordWrap(True)
+        layout.addWidget(msg)
+        form = QtWidgets.QFormLayout()
+        combos: Dict[str, QtWidgets.QComboBox] = {}
+        for key, count in sorted(unknown.items()):
+            combo = QtWidgets.QComboBox()
+            combo.addItems(self.project.names)
+            form.addRow(f"{old_names.get(key, key)}  ({count} labels) →", combo)
+            combos[key] = combo
+        layout.addLayout(form)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return None
+        return {key: self.project.classes[c.currentIndex()].key for key, c in combos.items()}
+
+    def _load_default_annotations(self) -> None:
         """Load annotations from JSON, migrating old formats and box-corrections files."""
         self._annotations = {}
         if self._annotation_path and self._annotation_path.exists():
@@ -1244,14 +1523,16 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             name = self.behavior_names[cls] if 0 <= cls < len(self.behavior_names) else f"cls:{cls}"
             corrected = isinstance(entry, dict) and entry.get("corrected", False)
             has_bbox = isinstance(entry, dict) and "bbox" in entry
-            if corrected:
+            if self.project is not None:
+                suffix = ""  # every label has a user-confirmed box
+            elif corrected:
                 suffix = "  ✓"
             elif has_bbox:
                 suffix = "  □"
             else:
                 suffix = ""
             item = QtWidgets.QListWidgetItem(f"Frame {k}:  {name}{suffix}")
-            if corrected:
+            if corrected and self.project is None:
                 item.setForeground(_cyan)
             self.list_annotations.addItem(item)
 
@@ -1263,7 +1544,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             cls = self._anno_cls(curr)
             name = self.behavior_names[cls] if 0 <= cls < len(self.behavior_names) else f"cls:{cls}"
             corrected = isinstance(curr, dict) and curr.get("corrected", False)
-            tag = "  ✓ corrected" if corrected else ""
+            tag = "  ✓ corrected" if corrected and self.project is None else ""
             self.lbl_saved_info.setText(f"Total: {count} | Current: {name}{tag}")
             self.lbl_saved_info.setStyleSheet("color: #00AA00; font-weight: bold;")
         else:
@@ -1304,9 +1585,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             f_str = item.text().split(":")[0].split(" ")[1]
             if f_str in self._annotations:
                 del self._annotations[f_str]
-                if self._annotation_path:
-                    with open(self._annotation_path, "w") as f:
-                        json.dump(self._annotations, f, indent=2)
+                self._write_annotations()
                 self._update_annotation_list()
                 self.set_frame(self._current_frame, force=True)
         except Exception as e:
@@ -1318,9 +1597,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             self._status_bar.showMessage("No annotation on this frame")
             return
         del self._annotations[f_str]
-        if self._annotation_path:
-            with open(self._annotation_path, "w") as f:
-                json.dump(self._annotations, f, indent=2)
+        self._write_annotations()
         self._update_annotation_list()
         self.set_frame(self._current_frame, force=True)
         self._status_bar.showMessage(f"Annotation deleted — frame {self._current_frame}")
@@ -1353,8 +1630,11 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         if self.preds is not None:
             dets = self.preds.for_frame(self._current_frame)
             if dets and dets[0].cls is not None:
-                cls = int(dets[0].cls)
-                if 0 <= cls < self.combo_classes.count():
+                cls: Optional[int] = int(dets[0].cls)
+                if self.project is not None:
+                    # Model outputs map onto project classes via `model_class`.
+                    cls = self.project.index_for_model_class(cls)
+                if cls is not None and 0 <= cls < self.combo_classes.count():
                     self.combo_classes.setCurrentIndex(cls)
 
     def _on_box_drawn(self, bbox: list) -> None:
@@ -1514,22 +1794,44 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         if self.chk_overlay.isChecked() and dets:
             frame = draw_overlays(frame, dets, style, box_color=_COLOR_ORIGINAL)
 
-        # Render corrected annotation bbox in cyan
-        anno = self._annotations.get(str(idx))
+        # Render the annotation box: cyan for corrections (default mode), the
+        # class color for labels (labeling mode).
+        anno = self._render_annotation(idx)
         widget_corrections: List[dict] = []
-        if anno and isinstance(anno, dict) and anno.get("corrected") and "bbox" in anno:
-            corr_det = Detection(
-                frame=idx,
-                bbox_xyxy=tuple(anno["bbox"]),
-                cls=anno.get("cls"),
-            )
-            frame = draw_overlays(frame, [corr_det], style, box_color=_COLOR_CORRECTION)
-            widget_corrections = [{"bbox": anno["bbox"], "cls": anno.get("cls", 0)}]
+        if anno is not None:
+            corr_det, anno_style, anno_color = anno
+            frame = draw_overlays(frame, [corr_det], anno_style, box_color=anno_color)
+            widget_corrections = [{"bbox": list(corr_det.bbox_xyxy), "cls": corr_det.cls}]
 
         img_h, img_w = frame.shape[:2]
         qimg = _bgr_to_qimage(frame)
         self.image_label.set_frame_data(qimg, img_w, img_h, dets, widget_corrections)
         self._update_annotation_list()
+
+    def _render_annotation(
+        self, idx: int
+    ) -> Optional[Tuple[Detection, OverlayStyle, Tuple[int, int, int]]]:
+        """Detection, style and color for drawing frame *idx*'s annotation, if it has a box."""
+        anno = self._annotations.get(str(idx))
+        if not (anno and isinstance(anno, dict) and anno.get("corrected") and "bbox" in anno):
+            return None
+        det = Detection(frame=idx, bbox_xyxy=tuple(anno["bbox"]), cls=anno.get("cls"))
+        style = self.cfg.overlay_style
+        color = self._class_bgr(anno.get("cls"))
+        if color is None:
+            return det, style, _COLOR_CORRECTION
+        # Labels are named by the project, predictions by the model.
+        return det, replace(style, class_names=self._class_names), color
+
+    def _annotations_for_render(self) -> dict:
+        """Annotations for the exporters; labeling-mode entries carry their name and color."""
+        if self.project is None:
+            return self._annotations
+        out = {}
+        for k, e in self._annotations.items():
+            cls = e["cls"]
+            out[k] = {**e, "name": self._class_names[cls], "color": self._class_bgr(cls)}
+        return out
 
     def _on_tick(self) -> None:
         if self.video is None:
@@ -1552,9 +1854,9 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             return
 
         # Derive a sensible default filename from the video stem
-        if self._annotation_path is not None:
-            stem = self._annotation_path.stem.removesuffix("_annotations")
-            default_dir = self._annotation_path.parent
+        if self.video is not None:
+            stem = Path(self.video.video_path).stem
+            default_dir = Path(self.video.video_path).parent
         else:
             stem = "frame"
             default_dir = Path.home()
@@ -1578,7 +1880,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             style.class_names = resolve_class_names(self.preds.meta.get("class_names"))
         else:
             dets = []
-        anno = self._annotations.get(str(self._current_frame))
+        anno = self._annotations_for_render().get(str(self._current_frame))
 
         try:
             from trackviz.render.snapshot import save_snapshot
@@ -1609,7 +1911,7 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         dlg = ExportDialog(
             video_path=Path(self.video.video_path),
             preds=self.preds,
-            annotations=self._annotations,
+            annotations=self._annotations_for_render(),
             max_frames=self.max_frames,
             style=self.cfg.overlay_style,
             fps=self.video.fps,
@@ -1643,9 +1945,10 @@ def run_viewer(
     video_path: Optional[str] = None,
     preds: Optional[Predictions] = None,
     config: Optional[ViewerConfig] = None,
+    project: Optional[Project] = None,
 ) -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    win = TrackVizWindow(video_path=video_path, preds=preds, config=config)
+    win = TrackVizWindow(video_path=video_path, preds=preds, config=config, project=project)
     win.resize(1200, 800)
     win.show()
     app.exec()

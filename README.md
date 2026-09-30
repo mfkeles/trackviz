@@ -129,6 +129,44 @@ All annotations are shown in the persistent sidebar list:
 | `Space` | Play / Pause |
 | `←` / `→` | Step one frame back / forward |
 
+## Labeling mode (custom behavior classes)
+
+By default trackviz runs in **visualization / fine-tuning mode** with the built-in fly classes described above. **Labeling mode** lets you define your own behavior classes in a small YAML *project* file. This works for any animal and any set of behaviors, and model predictions are optional.
+
+Create a starter project, edit its class list, then open it:
+
+```bash
+trackviz new-project regurgitation.yaml        # writes a commented template here
+trackviz new-project mouse_study               # bare name → ~/.config/trackviz/projects/mouse_study.yaml
+trackviz gui --project regurgitation.yaml      # a path…
+trackviz gui --project mouse_study             # …or a name from your projects folder
+```
+
+In the GUI you can also use **File → New Project… / Open Project… / Close Project**.
+
+```yaml
+name: mouse_study
+classes:
+  - name: Rearing                 # only `name` is required
+  - name: Grooming
+    key: grooming                 # stable id saved in label files (default: name in snake_case)
+    color: "#009E73"              # box color (default: colorblind-safe palette)
+    hotkey: 2                     # number key 0–9 (default: next free digit; null for none)
+    model_class: 2                # the model's class index for this behavior (optional)
+export:
+  heatmap: true                   # training export uses motion heatmaps (false = raw frames)
+```
+
+See [`examples/fly_regurgitation.yaml`](examples/fly_regurgitation.yaml) for the fly classes plus a new *Regurgitation* class.
+
+How labeling mode differs:
+
+- **Every label needs a box.** Draw one in Edit Mode (on by default here), or select a predicted box. If you re-class a frame that's already labeled, its existing box is kept.
+- **Boxes use each class's color**, and the label shows the project's class name. Predictions still show the model's names in green.
+- **`model_class` links your classes to the model.** A frame the model predicts as class 2 pre-selects whichever class has `model_class: 2`. Classes without it, like Regurgitation, are picked by hand. Without predictions, nothing is pre-selected.
+- **Labels are saved separately** to `<video_stem>_<project>_labels.json`, keyed by class `key`. Renaming, recoloring or reordering classes is always safe. If you remove a class that still has labels, trackviz asks you to move those labels to another class before it opens the video, and keeps a `.bak` copy of the previous file.
+- The fine-tuning file `<video_stem>_annotations.json` is never touched in labeling mode.
+
 ## Export video
 
 Click **Export Video…** (next to **Save Frame**) to render a segment of the current video to `.mp4` with overlays baked in.

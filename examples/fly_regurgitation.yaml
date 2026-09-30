@@ -1,0 +1,23 @@
+# Fly behavior labeling project: the model's 8 classes plus Regurgitation.
+#
+#   trackviz gui --project examples/fly_regurgitation.yaml
+#
+# `model_class` links each class to the prediction model's output index, so a
+# frame the model predicts as Grooming pre-selects Grooming in the dropdown.
+# Regurgitation has no model_class because the current model can't predict it.
+
+name: fly_regurgitation
+
+classes:
+  - {name: ProbPumping,   hotkey: 0, model_class: 0}
+  - {name: Moving,        hotkey: 1, model_class: 1}
+  - {name: Grooming,      hotkey: 2, model_class: 2}
+  - {name: Feeding,       hotkey: 3, model_class: 3}
+  - {name: Quiescent,     hotkey: 4, model_class: 4}
+  - {name: HaltereSwitch, hotkey: 5, model_class: 5}
+  - {name: Twitching,     hotkey: 6, model_class: 6}
+  - {name: Defecation,    hotkey: 7, model_class: 7}
+  - {name: Regurgitation, hotkey: 8, color: "#F0E442"}
+
+export:
+  heatmap: true
