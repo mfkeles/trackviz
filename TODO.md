@@ -9,7 +9,8 @@
 
 - [ ] **Range labeling** — mark start/end of an event (e.g. regurgitation) and label the frames in between, sampling every Nth frame for training
 - [ ] **Class editor dialog** — add/rename/recolor/reorder/delete classes from the GUI and save back to the project YAML (deleting a class with labels forces reassignment)
-- [ ] **YOLO dataset export** — full frames + `.txt` boxes + `data.yaml` for every labeled video in a project; motion heatmap by default, raw frames optional
+- [x] **YOLO dataset export** — `trackviz export-dataset`: full frames + `.txt` boxes + `data.yaml`; motion heatmap by default, raw frames optional; `--match-dataset` adds to an existing split dataset
+- [ ] **Train/val/test split for new datasets** — video-grouped split when exporting without `--match-dataset` (today: one flat folder; `unassigned/` for new videos)
 - [ ] **Per-class targets** — "Regurgitation: 34/50" progress, and scramble toward under-labeled classes
 - [ ] **Carry box forward** — keep the last drawn box on the next frame so it only needs nudging when there are no predictions
 - [ ] **`trackviz export` CLI in labeling mode** — `--project` so exported videos show project labels

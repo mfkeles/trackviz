@@ -46,6 +46,28 @@ def _build_parser() -> argparse.ArgumentParser:
     v.add_argument("--autoplay", action="store_true", help="Start playing immediately.")
     v.add_argument("--project", type=str, default=None, help=_PROJECT_HELP)
 
+    d = sub.add_parser(
+        "export-dataset",
+        help="Export a labeling project's labels as YOLO images + .txt files.",
+        description="Write one full-resolution image (6-frame motion heatmap by default) and one "
+                    "YOLO label file per labeled frame. With --match-dataset, files are sorted "
+                    "into the existing dataset's train/val/test split by video, and frames "
+                    "already in it are skipped; the existing dataset is never modified.",
+    )
+    d.add_argument("paths", nargs="+",
+                   help="Videos, or folders searched recursively for the project's label files.")
+    d.add_argument("--project", required=True, help=_PROJECT_HELP.replace("Open in labeling mode with", "Use"))
+    d.add_argument("--out", "-o", required=True, help="Output folder (must be empty or not exist).")
+    d.add_argument("--classes", nargs="+", default=None, metavar="CLASS",
+                   help="Only export these classes (names or keys), e.g. --classes Regurgitation.")
+    d.add_argument("--match-dataset", default=None, metavar="DIR",
+                   help="Existing split YOLO dataset (with data.yaml and train/val/test) to add to.")
+    img = d.add_mutually_exclusive_group()
+    img.add_argument("--heatmap", dest="heatmap", action="store_true", default=None,
+                     help="Export motion heatmaps (default unless the project sets export.heatmap: false).")
+    img.add_argument("--raw", dest="heatmap", action="store_false", help="Export raw frames.")
+    d.add_argument("--dry-run", action="store_true", help="Report what would be exported without writing.")
+
     n = sub.add_parser("new-project", help="Write a starter labeling-project YAML file.")
     n.add_argument(
         "path",
@@ -156,6 +178,43 @@ def _load_preds(args: argparse.Namespace) -> Predictions:
     raise SystemExit("Unsupported predictions format. Use .npz, or custom .npy/.csv exports.")
 
 
+def _export_dataset(args: argparse.Namespace) -> None:
+    from trackviz.render.dataset import ExistingDataset, export_dataset, find_labeled_videos
+
+    try:
+        project = load_project(args.project)
+    except ProjectError as e:
+        raise SystemExit(f"[trackviz] {e}")
+    videos, problems = find_labeled_videos(project, [Path(p) for p in args.paths])
+    for msg in problems:
+        print(f"[trackviz] Warning: {msg}")
+    if not videos:
+        raise SystemExit(f"[trackviz] No label files for project '{project.name}' found.")
+    print(f"[trackviz] {len(videos)} labeled video(s) for project '{project.name}'")
+
+    try:
+        existing = ExistingDataset.load(Path(args.match_dataset)) if args.match_dataset else None
+        result = export_dataset(
+            project, videos, Path(args.out),
+            heatmap=args.heatmap, classes=args.classes, match_dataset=existing,
+            dry_run=args.dry_run, progress=lambda msg: print(f"  {msg}"),
+        )
+    except ValueError as e:
+        raise SystemExit(f"[trackviz] {e}")
+
+    verb = "Would export" if args.dry_run else "Exported"
+    print(f"\n[trackviz] {verb} {result.total_exported} image(s)")
+    for (split, name), count in sorted(result.exported.items()):
+        print(f"  {split + '/' if split else ''}{name}: {count}")
+    for reason, count in sorted(result.skipped.items()):
+        print(f"  {reason}: {count}")
+    if not args.dry_run:
+        print(f"[trackviz] Output: {result.out_dir}  (see manifest.csv for every frame)")
+        if any(split == "unassigned" for split, _ in result.exported):
+            print("[trackviz] Note: 'unassigned/' holds frames from videos not in the dataset — "
+                  "move them into train, val or test yourself (keep each video in one split).")
+
+
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
@@ -170,6 +229,10 @@ def main() -> None:
             raise SystemExit(f"[trackviz] {e}")
         print(f"[trackviz] Created {written}\n"
               f"Edit its class list, then run:  trackviz gui --project {written}")
+        return
+
+    if args.cmd == "export-dataset":
+        _export_dataset(args)
         return
 
     project = None
