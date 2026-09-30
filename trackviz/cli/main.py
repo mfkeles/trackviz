@@ -10,6 +10,12 @@ import cv2
 from trackviz.gui.viewer import ViewerConfig, run_viewer
 from trackviz.io.auto import autoload_predictions
 from trackviz.io.predictions import Predictions
+from trackviz.io.project import ProjectError, load_project, user_projects_dir, write_project_template
+
+_PROJECT_HELP = (
+    "Open in labeling mode with this project: a .yaml path, or the name of a project in "
+    f"{user_projects_dir()}."
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -18,6 +24,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     g = sub.add_parser("gui", help="Open the GUI viewer (drag-and-drop a video to load predictions).")
     g.add_argument("--autoplay", action="store_true", help="Start playing immediately after loading a video.")
+    g.add_argument("--project", type=str, default=None, help=_PROJECT_HELP)
 
     v = sub.add_parser("view", help="Open a GUI viewer.")
     v.add_argument("video", type=str, help="Path to the video file.")
@@ -37,6 +44,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Interpret CSV bbox columns (x,y,w,h) as YOLO format (x/y are center).",
     )
     v.add_argument("--autoplay", action="store_true", help="Start playing immediately.")
+    v.add_argument("--project", type=str, default=None, help=_PROJECT_HELP)
+
+    n = sub.add_parser("new-project", help="Write a starter labeling-project YAML file.")
+    n.add_argument(
+        "path",
+        type=str,
+        help="Where to write it (e.g. ./regurgitation.yaml). A bare name is created in "
+             f"{user_projects_dir()}.",
+    )
 
     e = sub.add_parser("export", help="Render video with prediction overlays and save to a file.")
     e.add_argument("video", type=str, help="Path to the source video file.")
@@ -144,15 +160,34 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
+    if args.cmd == "new-project":
+        target = Path(args.path).expanduser()
+        if len(target.parts) == 1 and target.suffix.lower() not in (".yaml", ".yml"):
+            target = user_projects_dir() / f"{target.name}.yaml"
+        try:
+            written = write_project_template(target)
+        except ProjectError as e:
+            raise SystemExit(f"[trackviz] {e}")
+        print(f"[trackviz] Created {written}\n"
+              f"Edit its class list, then run:  trackviz gui --project {written}")
+        return
+
+    project = None
+    if getattr(args, "project", None):
+        try:
+            project = load_project(args.project)
+        except ProjectError as e:
+            raise SystemExit(f"[trackviz] {e}")
+
     if args.cmd == "gui":
         cfg = ViewerConfig(start_paused=not args.autoplay)
-        run_viewer(None, None, cfg)
+        run_viewer(None, None, cfg, project=project)
         return
 
     if args.cmd == "view":
         preds = _load_preds(args)
         cfg = ViewerConfig(start_paused=not args.autoplay)
-        run_viewer(args.video, preds, cfg)
+        run_viewer(args.video, preds, cfg, project=project)
 
     if args.cmd == "export":
         from trackviz.render.export import export_video, load_annotations

@@ -14,7 +14,12 @@ import cv2
 import numpy as np
 
 from trackviz.io.predictions import Detection
-from trackviz.render.export import _COLOR_CORRECTION, _COLOR_PREDICTION, _draw_overlays_export
+from trackviz.render.export import (
+    _COLOR_CORRECTION,
+    _COLOR_PREDICTION,
+    _draw_overlays_export,
+    annotation_overlay,
+)
 from trackviz.render.overlay import LabelRect, OverlayStyle, place_label_top
 
 # Hex equivalents of the BGR export colours (for matplotlib / SVG)
@@ -81,12 +86,12 @@ def save_snapshot(
             f"Unsupported format {suffix!r}. Choose .png, .svg, or .pdf."
         )
 
-    corr_det = _corr_det_from_annotation(annotation, frame_idx)
+    corr = annotation_overlay(annotation, frame_idx, style)
 
     if suffix == ".png":
-        _save_png(raw_frame_bgr, detections, corr_det, style, out_path)
+        _save_png(raw_frame_bgr, detections, corr, style, out_path)
     else:
-        _save_vector(raw_frame_bgr, detections, corr_det, style, out_path)
+        _save_vector(raw_frame_bgr, detections, corr, style, out_path)
 
 
 # ---------------------------------------------------------------------------
@@ -96,14 +101,15 @@ def save_snapshot(
 def _save_png(
     raw_frame_bgr: np.ndarray,
     detections: List[Detection],
-    corr_det: Optional[Detection],
+    corr: Optional[Tuple[Detection, OverlayStyle, Tuple[int, int, int]]],
     style: OverlayStyle,
     out_path: Path,
 ) -> None:
     frame = raw_frame_bgr.copy()
     _draw_overlays_export(frame, detections, style, _COLOR_PREDICTION)
-    if corr_det is not None:
-        _draw_overlays_export(frame, [corr_det], style, _COLOR_CORRECTION)
+    if corr is not None:
+        corr_det, corr_style, corr_color = corr
+        _draw_overlays_export(frame, [corr_det], corr_style, corr_color)
     cv2.imwrite(str(out_path), frame)
 
 
@@ -114,7 +120,7 @@ def _save_png(
 def _save_vector(
     raw_frame_bgr: np.ndarray,
     detections: List[Detection],
-    corr_det: Optional[Detection],
+    corr: Optional[Tuple[Detection, OverlayStyle, Tuple[int, int, int]]],
     style: OverlayStyle,
     out_path: Path,
 ) -> None:
@@ -147,8 +153,12 @@ def _save_vector(
     ax.axis("off")
 
     _draw_mpl_boxes(ax, detections, _PRED_HEX, style, h)
-    if corr_det is not None:
-        _draw_mpl_boxes(ax, [corr_det], _CORR_HEX, style, h)
+    if corr is not None:
+        corr_det, corr_style, corr_color = corr
+        # Default-mode corrections keep their established vector color.
+        hex_color = (_CORR_HEX if corr_color == _COLOR_CORRECTION
+                     else "#{2:02x}{1:02x}{0:02x}".format(*corr_color))
+        _draw_mpl_boxes(ax, [corr_det], hex_color, corr_style, h)
 
     fmt = out_path.suffix[1:].lower()
     fig.savefig(str(out_path), format=fmt, dpi=dpi, bbox_inches="tight", pad_inches=0)
@@ -246,20 +256,6 @@ def _draw_mpl_boxes(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _corr_det_from_annotation(
-    annotation: Optional[dict],
-    frame_idx: int,
-) -> Optional[Detection]:
-    """Build a Detection from a corrected annotation dict, or return None."""
-    if annotation and annotation.get("corrected") and "bbox" in annotation:
-        return Detection(
-            frame=frame_idx,
-            bbox_xyxy=tuple(annotation["bbox"]),
-            cls=annotation.get("cls"),
-        )
-    return None
-
 
 def _make_label(det: Detection, style: OverlayStyle) -> str:
     """Compose the label string for a detection, respecting OverlayStyle flags."""

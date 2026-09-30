@@ -4,6 +4,7 @@ import json
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
@@ -436,21 +437,36 @@ def _render_frame(
             frame = _draw_overlays_export(frame, dets, style, _COLOR_PREDICTION)
 
     if include_annotations:
-        anno = annotations.get(str(idx))
-        if anno and anno.get("corrected") and "bbox" in anno:
-            bbox = anno["bbox"]
-            if scale != 1.0:
-                bbox = [c * scale for c in bbox]
-            corr_det = Detection(
-                frame=idx,
-                bbox_xyxy=tuple(bbox),
-                cls=anno.get("cls"),
-                confidence=None,
-                track_id=None,
-            )
-            frame = _draw_overlays_export(frame, [corr_det], style, _COLOR_CORRECTION)
+        drawn = annotation_overlay(annotations.get(str(idx)), idx, style, scale)
+        if drawn is not None:
+            corr_det, anno_style, anno_color = drawn
+            frame = _draw_overlays_export(frame, [corr_det], anno_style, anno_color)
 
     return frame
+
+
+def annotation_overlay(
+    anno: Optional[dict],
+    idx: int,
+    style: OverlayStyle,
+    scale: float = 1.0,
+) -> Optional[Tuple[Detection, OverlayStyle, Tuple[int, int, int]]]:
+    """Return ``(detection, style, BGR color)`` for drawing an annotation box, or None.
+
+    Corrected boxes (default mode) draw in cyan with the style's class names.
+    Labeling-mode entries carry their own ``"name"`` and ``"color"`` (BGR),
+    since project class names differ from the model's.
+    """
+    if not (anno and anno.get("corrected") and "bbox" in anno):
+        return None
+    bbox = [c * scale for c in anno["bbox"]]
+    cls = anno.get("cls")
+    if "name" in anno:
+        style = replace(style, class_names=[anno["name"]])
+        cls = 0
+    det = Detection(frame=idx, bbox_xyxy=tuple(bbox), cls=cls, confidence=None, track_id=None)
+    color = tuple(anno["color"]) if anno.get("color") is not None else _COLOR_CORRECTION
+    return det, style, color
 
 
 # ---------------------------------------------------------------------------
