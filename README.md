@@ -166,6 +166,7 @@ How labeling mode differs:
 - **`model_class` links your classes to the model.** A frame the model predicts as class 2 pre-selects whichever class has `model_class: 2`. Classes without it, like Regurgitation, are picked by hand. Without predictions, nothing is pre-selected.
 - **Labels are saved separately** to `<video_stem>_<project>_labels.json`, keyed by class `key`. Renaming, recoloring or reordering classes is always safe. If you remove a class that still has labels, trackviz asks you to move those labels to another class before it opens the video, and keeps a `.bak` copy of the previous file.
 - The fine-tuning file `<video_stem>_annotations.json` is never touched in labeling mode.
+- **Importing existing annotations:** the first time you open a video in a project, if it has a `<video_stem>_annotations.json` from visualization mode, trackviz offers to copy those annotations into the project. Classes are matched by name, and any class the project doesn't have goes through the same reassignment prompt. Entries without a box are listed so you can redo them. The original file is not changed.
 
 ## Export video
 
