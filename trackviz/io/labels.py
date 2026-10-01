@@ -20,9 +20,9 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
-from trackviz.io.project import Project
+from trackviz.io.project import Project, slugify
 
 FORMAT_NAME = "trackviz-labels"
 FORMAT_VERSION = 1
@@ -86,6 +86,47 @@ def read_labels(path: Path) -> LabelFile:
             raise LabelFileError(f"{path.name}: bad label for frame {frame_str!r}: {e}") from e
     class_names = {str(k): str(v) for k, v in (data.get("classes") or {}).items()}
     return LabelFile(labels=labels, class_names=class_names)
+
+
+def import_default_annotations(
+    path: Path, class_names: List[str], project: Project
+) -> Tuple[LabelFile, List[int]]:
+    """Convert a default-mode ``<video>_annotations.json`` into a :class:`LabelFile`.
+
+    Default-mode entries store the class as an index into *class_names* (the
+    built-in fly classes).  Each is matched to a project class **by name**
+    (case-insensitive) or by key; unmatched classes keep a derived key so the
+    caller's reassignment step can map them.  Entries without a box cannot be
+    labels and are returned as skipped frame numbers.  *path* is only read.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise LabelFileError(f"Could not read {Path(path).name}: {e}") from e
+    if not isinstance(raw, dict):
+        raise LabelFileError(f"{Path(path).name} is not a trackviz annotation file")
+
+    by_name = {c.name.lower(): c.key for c in project.classes}
+    labels: Dict[int, Label] = {}
+    old_names: Dict[str, str] = {}
+    skipped: List[int] = []
+    for frame_str, entry in raw.items():
+        try:
+            frame = int(frame_str)
+            cls = int(entry if isinstance(entry, int) else entry["cls"])
+            bbox = None if isinstance(entry, int) else entry.get("bbox")
+        except (KeyError, TypeError, ValueError, AttributeError):
+            skipped.append(int(frame_str) if str(frame_str).isdigit() else -1)
+            continue
+        if bbox is None or len(bbox) != 4:
+            skipped.append(frame)
+            continue
+        name = class_names[cls] if 0 <= cls < len(class_names) else f"cls_{cls}"
+        key = by_name.get(name.lower()) or slugify(name)
+        old_names.setdefault(key, name)
+        labels[frame] = Label(key, [float(v) for v in bbox])
+    return LabelFile(labels=labels, class_names=old_names), sorted(skipped)
 
 
 def write_labels(path: Path, label_file: LabelFile, project: Project,

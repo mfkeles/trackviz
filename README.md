@@ -166,6 +166,30 @@ How labeling mode differs:
 - **`model_class` links your classes to the model.** A frame the model predicts as class 2 pre-selects whichever class has `model_class: 2`. Classes without it, like Regurgitation, are picked by hand. Without predictions, nothing is pre-selected.
 - **Labels are saved separately** to `<video_stem>_<project>_labels.json`, keyed by class `key`. Renaming, recoloring or reordering classes is always safe. If you remove a class that still has labels, trackviz asks you to move those labels to another class before it opens the video, and keeps a `.bak` copy of the previous file.
 - The fine-tuning file `<video_stem>_annotations.json` is never touched in labeling mode.
+- **Importing existing annotations:** the first time you open a video in a project, if it has a `<video_stem>_annotations.json` from visualization mode, trackviz offers to copy those annotations into the project. Classes are matched by name, and any class the project doesn't have goes through the same reassignment prompt. Entries without a box are listed so you can redo them. The original file is not changed.
+
+### Exporting training data (YOLO)
+
+`trackviz export-dataset` turns a project's labels into a YOLO detection dataset. It writes one full-resolution image per labeled frame and one `.txt` file with its box (`<class> cx cy w h`, normalized), plus `data.yaml` and a `manifest.csv` that records what happened to every frame. Images are 6-frame motion heatmaps by default; use `--raw` for plain frames, or set `export: {heatmap: false}` in the project. Class numbers follow the order of the project's classes.
+
+```bash
+# New dataset from every labeled video under a folder
+trackviz export-dataset --project fly_regurgitation.yaml --out ./regurg_dataset /path/to/Data
+
+# Add only the new Regurgitation frames to an existing split dataset
+trackviz export-dataset --project fly_regurgitation.yaml --classes Regurgitation \
+    --match-dataset /path/to/sorted_data_heatmaps_fullres_with_twitching_defecation \
+    --out ./regurg_additions --dry-run /path/to/Data
+```
+
+With `--match-dataset`, the existing dataset is only read, never modified. The output is laid out so you can copy it in:
+
+- Frames from a video already in the dataset go to that video's `train/`, `val/` or `test/`, so no video ends up in two splits.
+- Frames from new videos go to `unassigned/`; you decide their split.
+- Frames already in the dataset are skipped. If a frame is in the dataset under a different class, it's reported in the manifest instead of being added a second time.
+- The dataset's `data.yaml` classes must match the project's classes index for index. The project may add classes after them (e.g. Regurgitation as class 8), and the output `data.yaml` lists the full set.
+
+Images and labels are generated the same way as in the flyolo dataset builder: same window, threshold, blend, JPEG quality and file names. On the same machine the output is byte-identical to flyolo's.
 
 ## Export video
 

@@ -12,7 +12,14 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from trackviz.io.auto import autoload_predictions
 from trackviz.io.class_names import BEHAVIOR_NAMES, resolve_class_names
-from trackviz.io.labels import Label, LabelFile, LabelFileError, read_labels, write_labels
+from trackviz.io.labels import (
+    Label,
+    LabelFile,
+    LabelFileError,
+    import_default_annotations,
+    read_labels,
+    write_labels,
+)
 from trackviz.io.predictions import Detection, Predictions
 from trackviz.io.project import Project, ProjectError, load_project, write_project_template
 from trackviz.render.overlay import OverlayStyle, draw_overlays
@@ -1400,23 +1407,35 @@ class TrackVizWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Could not read labels", str(e))
             return False
 
+        imported: Optional[List[int]] = None  # skipped frames, when an import happened
+        if not self._annotation_path.exists():
+            offer = self._offer_default_import()
+            if offer is not None:
+                label_file, imported = offer
+
         unknown = label_file.unknown_classes(self.project)
         if unknown:
             mapping = self._ask_class_reassignment(unknown, label_file.class_names)
             if mapping is None:
                 return False
+            label_file.reassign(mapping)
+
+        if unknown or imported is not None:
             backup = self._annotation_path.with_name(self._annotation_path.name + ".bak")
             try:
-                backup.write_bytes(self._annotation_path.read_bytes())
-                label_file.reassign(mapping)
+                if self._annotation_path.exists():
+                    backup.write_bytes(self._annotation_path.read_bytes())
                 video_name = Path(self.video.video_path).name if self.video else None
                 write_labels(self._annotation_path, label_file, self.project, video_name)
             except OSError as e:
                 QtWidgets.QMessageBox.critical(self, "Save failed", f"Could not update labels:\n{e}")
                 return False
-            self._status_bar.showMessage(
-                f"Reassigned {sum(unknown.values())} labels — previous file kept as {backup.name}"
-            )
+            if imported is not None:
+                self._report_import(len(label_file.labels), imported)
+            else:
+                self._status_bar.showMessage(
+                    f"Reassigned {sum(unknown.values())} labels — previous file kept as {backup.name}"
+                )
 
         self._label_file = label_file
         for frame, lab in label_file.labels.items():
@@ -1426,6 +1445,54 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         self._update_annotation_list()
         return True
 
+    def _offer_default_import(self) -> Optional[Tuple[LabelFile, List[int]]]:
+        """Offer to copy this video's default-mode annotations into the project.
+
+        Returns the converted labels and skipped (box-less) frames, or None if
+        there is nothing to import or the user declines.
+        """
+        if self.video is None:
+            return None
+        video_path = Path(self.video.video_path)
+        default_path = video_path.parent / f"{video_path.stem}_annotations.json"
+        if not default_path.exists():
+            return None
+        try:
+            label_file, skipped = import_default_annotations(
+                default_path, list(BEHAVIOR_NAMES), self.project
+            )
+        except LabelFileError as e:
+            QtWidgets.QMessageBox.warning(self, "Could not import annotations", str(e))
+            return None
+        if not label_file.labels and not skipped:
+            return None
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Import existing annotations?",
+            f"{default_path.name} has {len(label_file.labels) + len(skipped)} annotations from "
+            f"visualization mode.\n\nImport them into project '{self.project.name}'? Classes are "
+            "matched by name. The original file is not changed.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.Yes,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return None
+        return label_file, skipped
+
+    def _report_import(self, n_imported: int, skipped: List[int]) -> None:
+        self._status_bar.showMessage(f"Imported {n_imported} annotations into '{self.project.name}'")
+        if not skipped:
+            return
+        shown = ", ".join(str(f) for f in skipped[:30])
+        more = f", … (+{len(skipped) - 30} more)" if len(skipped) > 30 else ""
+        QtWidgets.QMessageBox.information(
+            self,
+            "Some annotations were not imported",
+            f"Imported {n_imported} annotations. {len(skipped)} had no box and were skipped, "
+            f"because every label in labeling mode needs one:\n\nFrames: {shown}{more}\n\n"
+            "Draw a box on those frames and save them again to include them.",
+        )
+
     def _ask_class_reassignment(
         self, unknown: Dict[str, int], old_names: Dict[str, str]
     ) -> Optional[Dict[str, str]]:
@@ -1434,9 +1501,9 @@ class TrackVizWindow(QtWidgets.QMainWindow):
         dlg.setWindowTitle("Reassign labels")
         layout = QtWidgets.QVBoxLayout(dlg)
         msg = QtWidgets.QLabel(
-            f"{self._annotation_path.name} has labels for classes that are not in project "
-            f"'{self.project.name}'.\nChoose a class for each before continuing. "
-            "A backup of the file is kept (.bak)."
+            f"Some labels for {self._annotation_path.name} use classes that are not in "
+            f"project '{self.project.name}'.\nChoose a class for each before continuing. "
+            "An existing label file is backed up first (.bak)."
         )
         msg.setWordWrap(True)
         layout.addWidget(msg)

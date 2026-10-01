@@ -27,6 +27,11 @@ def no_modal_dialogs(monkeypatch):
     for name in ("warning", "critical", "information"):
         monkeypatch.setattr(QtWidgets.QMessageBox, name,
                             staticmethod(lambda *a, _n=name, **k: shown.append((_n, a[1:]))))
+
+    def question(*a, **k):
+        shown.append(("question", a[1:]))
+        return QtWidgets.QMessageBox.Yes
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question", staticmethod(question))
     return shown
 
 
@@ -172,3 +177,59 @@ def test_default_mode_file_format_unchanged(app, video):
     _label(win, 6, 3, [1, 2, 3, 4])
     saved = json.loads((video.parent / "mouse01_annotations.json").read_text())
     assert saved == {"6": {"cls": 3, "corrected": True, "bbox": [1.0, 2.0, 3.0, 4.0]}}
+
+
+def _write_default_annotations(video):
+    path = video.parent / "mouse01_annotations.json"
+    path.write_text(json.dumps({
+        "3": {"cls": 2, "bbox": [1, 2, 3, 4], "corrected": False},   # Grooming, predicted box
+        "5": {"cls": 6, "bbox": [5, 6, 7, 8], "corrected": True},    # Twitching
+        "9": 4,                                                     # oldest format, no box
+        "11": {"cls": 0, "corrected": False},                       # no box
+    }))
+    return path
+
+
+def test_default_annotations_import_on_first_open(app, video, no_modal_dialogs):
+    default_path = _write_default_annotations(video)
+    original = default_path.read_text()
+    project = project_from_dict({"name": "flies", "classes": list(BEHAVIOR_NAMES) + ["Regurgitation"]})
+    win = _window(app, project, video)
+
+    assert [d[0] for d in no_modal_dialogs] == ["question", "information"]   # offer, then skipped report
+    assert "9, 11" in no_modal_dialogs[1][1][1]
+    saved = json.loads((video.parent / "mouse01_flies_labels.json").read_text())["labels"]
+    assert saved == {
+        "3": {"class": "grooming", "bbox": [1.0, 2.0, 3.0, 4.0]},
+        "5": {"class": "twitching", "bbox": [5.0, 6.0, 7.0, 8.0]},
+    }
+    assert win._annotations["3"]["cls"] == 2
+    assert default_path.read_text() == original
+
+    # Once the project has its own label file, there's no second offer.
+    no_modal_dialogs.clear()
+    _window(app, project, video)
+    assert no_modal_dialogs == []
+
+
+def test_declined_import_starts_empty(app, video, monkeypatch):
+    _write_default_annotations(video)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QtWidgets.QMessageBox.No))
+    win = _window(app, _project(["Grooming"]), video)
+    assert win._annotations == {}
+    assert not (video.parent / "mouse01_mice_labels.json").exists()
+
+
+def test_import_unmatched_class_goes_through_reassignment(app, video, monkeypatch):
+    _write_default_annotations(video)
+    seen = {}
+
+    def choose(self, unknown, old_names):
+        seen.update(unknown=unknown, old_names=old_names)
+        return {"twitching": "grooming"}
+
+    monkeypatch.setattr(TrackVizWindow, "_ask_class_reassignment", choose)
+    win = _window(app, _project(["Grooming"]), video)
+    assert seen == {"unknown": {"twitching": 1}, "old_names": {"grooming": "Grooming", "twitching": "Twitching"}}
+    assert {k: e["cls"] for k, e in win._annotations.items()} == {"3": 0, "5": 0}
