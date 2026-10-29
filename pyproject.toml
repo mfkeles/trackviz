@@ -18,6 +18,11 @@ dependencies = [
   "pyyaml>=6.0",
 ]
 
+[project.optional-dependencies]
+# `trackviz train` — ultralytics pulls in PyTorch. On CUDA machines install the
+# CUDA build of torch first (https://pytorch.org/get-started/locally/).
+train = ["ultralytics>=8.3"]
+
 [project.scripts]
 trackviz = "trackviz.cli.main:main"
 

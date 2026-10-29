@@ -182,6 +182,14 @@ trackviz export-dataset --project fly_regurgitation.yaml --classes Regurgitation
     --out ./regurg_additions --dry-run /path/to/Data
 ```
 
+**New dataset with a train/val split** — add `--split` and whole videos are assigned to `train/`, `val/` (and `test/` if you give three fractions), so frames from one fly never end up in both. Fractions are of frames and must add up to 1; `--seed` changes the assignment. You need at least one labeled video per split.
+
+```bash
+trackviz export-dataset --project fly_regurgitation.yaml --split 0.8 0.2 --out ./regurg_dataset /path/to/videos
+```
+
+Videos that share a file name (e.g. every session saved as `raw.mp4`) get their folder name as a prefix in image names.
+
 With `--match-dataset`, the existing dataset is only read, never modified. The output is laid out so you can copy it in:
 
 - Frames from a video already in the dataset go to that video's `train/`, `val/` or `test/`, so no video ends up in two splits.
@@ -190,6 +198,17 @@ With `--match-dataset`, the existing dataset is only read, never modified. The o
 - The dataset's `data.yaml` classes must match the project's classes index for index. The project may add classes after them (e.g. Regurgitation as class 8), and the output `data.yaml` lists the full set.
 
 Images and labels are generated the same way as in the flyolo dataset builder: same window, threshold, blend, JPEG quality and file names. On the same machine the output is byte-identical to flyolo's.
+
+### Training a model
+
+`trackviz train` trains a YOLO detector on a `--split` dataset with the flyolo paper settings (YOLO11-l, 800 px, rectangular batches, no hue/saturation augmentation so heatmap colors are preserved). It picks a CUDA GPU, Apple Silicon (MPS) or CPU automatically and prints the path to `best.pt` when done, which you can load in the tracking GUI.
+
+```bash
+pip install "trackviz[train]"        # or: uv sync --extra train
+trackviz train ./regurg_dataset
+```
+
+Useful options: `--model` to start from other weights (e.g. an existing fly model to fine-tune), `--epochs` (default 200, stops early after `--patience` 100 epochs without improvement), `--batch` (default 16; lower it if the GPU runs out of memory), `--device`, `--out`. Runs are written to `<dataset>/runs/`. On a CUDA machine, install the CUDA build of PyTorch first (https://pytorch.org/get-started/locally/).
 
 ## Export video
 

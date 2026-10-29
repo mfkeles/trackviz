@@ -50,9 +50,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "export-dataset",
         help="Export a labeling project's labels as YOLO images + .txt files.",
         description="Write one full-resolution image (6-frame motion heatmap by default) and one "
-                    "YOLO label file per labeled frame. With --match-dataset, files are sorted "
-                    "into the existing dataset's train/val/test split by video, and frames "
-                    "already in it are skipped; the existing dataset is never modified.",
+                    "YOLO label file per labeled frame. With --split, whole videos are assigned "
+                    "to new train/val(/test) folders, ready for `trackviz train`. With "
+                    "--match-dataset, files are sorted into an existing dataset's split by video, "
+                    "and frames already in it are skipped; the existing dataset is never modified.",
     )
     d.add_argument("paths", nargs="+",
                    help="Videos, or folders searched recursively for the project's label files.")
@@ -60,13 +61,41 @@ def _build_parser() -> argparse.ArgumentParser:
     d.add_argument("--out", "-o", required=True, help="Output folder (must be empty or not exist).")
     d.add_argument("--classes", nargs="+", default=None, metavar="CLASS",
                    help="Only export these classes (names or keys), e.g. --classes Regurgitation.")
-    d.add_argument("--match-dataset", default=None, metavar="DIR",
-                   help="Existing split YOLO dataset (with data.yaml and train/val/test) to add to.")
+    mode = d.add_mutually_exclusive_group()
+    mode.add_argument("--split", nargs="+", type=float, default=None, metavar="FRAC",
+                      help="Split into train/val(/test) by video, e.g. --split 0.8 0.2 or "
+                           "--split 0.7 0.15 0.15. Fractions are of frames and must add up to 1.")
+    mode.add_argument("--match-dataset", default=None, metavar="DIR",
+                      help="Existing split YOLO dataset (with data.yaml and train/val/test) to add to.")
+    d.add_argument("--seed", type=int, default=0, help="Seed for --split (default: 0).")
     img = d.add_mutually_exclusive_group()
     img.add_argument("--heatmap", dest="heatmap", action="store_true", default=None,
                      help="Export motion heatmaps (default unless the project sets export.heatmap: false).")
     img.add_argument("--raw", dest="heatmap", action="store_false", help="Export raw frames.")
     d.add_argument("--dry-run", action="store_true", help="Report what would be exported without writing.")
+
+    t = sub.add_parser(
+        "train",
+        help="Train a YOLO model on a dataset from `export-dataset --split`.",
+        description="Train a YOLO detector with the flyolo paper settings (YOLO11-l, 800 px, "
+                    "no hue/saturation augmentation so heatmap colors are preserved). Needs "
+                    'the train extra:  pip install "trackviz[train]"',
+    )
+    t.add_argument("dataset", help="Folder written by `trackviz export-dataset --split` (has data.yaml).")
+    t.add_argument("--model", default="yolo11l.pt",
+                   help="Starting weights: a YOLO name (default yolo11l.pt, downloaded once) or a "
+                        ".pt file, e.g. an existing fly model to fine-tune.")
+    t.add_argument("--epochs", type=int, default=200, help="Maximum epochs (default: 200).")
+    t.add_argument("--patience", type=int, default=100,
+                   help="Stop after this many epochs without improvement (default: 100).")
+    t.add_argument("--imgsz", type=int, default=None, help="Training image size (default: 800).")
+    t.add_argument("--batch", type=int, default=None,
+                   help="Batch size (default: 16; lower it if you run out of GPU memory).")
+    t.add_argument("--device", default=None,
+                   help="cuda index (0), mps or cpu (default: picked automatically).")
+    t.add_argument("--workers", type=int, default=8, help="Dataloader workers (default: 8).")
+    t.add_argument("--out", default=None, help="Where training runs go (default: <dataset>/runs).")
+    t.add_argument("--name", default="train", help="Run name (default: train).")
 
     n = sub.add_parser("new-project", help="Write a starter labeling-project YAML file.")
     n.add_argument(
@@ -197,6 +226,7 @@ def _export_dataset(args: argparse.Namespace) -> None:
         result = export_dataset(
             project, videos, Path(args.out),
             heatmap=args.heatmap, classes=args.classes, match_dataset=existing,
+            split=args.split, seed=args.seed,
             dry_run=args.dry_run, progress=lambda msg: print(f"  {msg}"),
         )
     except ValueError as e:
@@ -208,8 +238,22 @@ def _export_dataset(args: argparse.Namespace) -> None:
         print(f"  {split + '/' if split else ''}{name}: {count}")
     for reason, count in sorted(result.skipped.items()):
         print(f"  {reason}: {count}")
+    if result.video_splits:
+        print("[trackviz] Videos per split:")
+        for split in ("train", "val", "test"):
+            vids = sorted(v for v, s in result.video_splits.items() if s == split)
+            if vids:
+                print(f"  {split}: {', '.join(vids)}")
+        in_train = {n for (s, n) in result.exported if s == "train"}
+        in_val = {n for (s, n) in result.exported if s == "val"}
+        missing = sorted(in_train - in_val)
+        if missing:
+            print(f"[trackviz] Warning: no val frames for {', '.join(missing)} — its scores can't be "
+                  "checked. Label it in more videos, or try another --seed.")
     if not args.dry_run:
         print(f"[trackviz] Output: {result.out_dir}  (see manifest.csv for every frame)")
+        if result.video_splits:
+            print(f"[trackviz] Next:  trackviz train {result.out_dir}")
         if any(split == "unassigned" for split, _ in result.exported):
             print("[trackviz] Note: 'unassigned/' holds frames from videos not in the dataset — "
                   "move them into train, val or test yourself (keep each video in one split).")
@@ -233,6 +277,21 @@ def main() -> None:
 
     if args.cmd == "export-dataset":
         _export_dataset(args)
+        return
+
+    if args.cmd == "train":
+        from trackviz.train import TrainError, train
+
+        try:
+            best = train(
+                Path(args.dataset), model=args.model, epochs=args.epochs, patience=args.patience,
+                imgsz=args.imgsz, batch=args.batch, device=args.device, workers=args.workers,
+                out=Path(args.out) if args.out else None, name=args.name,
+                say=lambda msg: print(f"[trackviz] {msg}"),
+            )
+        except TrainError as e:
+            raise SystemExit(f"[trackviz] {e}")
+        print(f"\n[trackviz] Done. Trained model: {best}")
         return
 
     project = None

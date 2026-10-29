@@ -29,6 +29,17 @@ With ``match_dataset`` pointing at an existing split YOLO dataset
 
 The existing dataset is only read, never modified.
 
+Splitting a new dataset
+-----------------------
+With ``split=(train, val, test)`` fractions the export writes
+``<out>/train|val|test/images|labels`` and assigns **whole videos** to splits
+(frames from one fly never end up in both train and val), aiming for the
+requested fraction of frames in each split.  Assignment is deterministic for a
+given ``seed``.
+
+Videos that share a file name (e.g. every session saved as ``raw.mp4``) get
+their parent folder's name as a prefix in image names, so files never collide.
+
 The heatmap is computed exactly like the flyolo dataset builder
 (``step2_build_datasets.py``): the newest frame of the window ending at the
 labeled frame is the reference, earlier frames are thresholded absolute
@@ -38,6 +49,7 @@ reference.
 from __future__ import annotations
 
 import csv
+import random
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -174,6 +186,64 @@ def find_labeled_videos(project: Project, paths: Iterable[Path]) -> Tuple[List[L
     return sorted(found.values(), key=lambda lv: str(lv.video)), problems
 
 
+def unique_stems(videos: Sequence[LabeledVideo]) -> Dict[Path, str]:
+    """Name used for each video in image files: its stem, prefixed with the parent
+    folder's name when several videos share a stem (e.g. ``20260317_raw``)."""
+    counts = Counter(lv.video.stem for lv in videos)
+    names: Dict[Path, str] = {}
+    for lv in videos:
+        stem = lv.video.stem
+        names[lv.video] = f"{lv.video.parent.name}_{stem}" if counts[stem] > 1 else stem
+    taken = Counter(names.values())
+    clashes = sorted(n for n, c in taken.items() if c > 1)
+    if clashes:
+        raise ValueError(f"Videos still share a name after adding their folder name: {', '.join(clashes)}. "
+                         "Rename them so each video name is unique.")
+    return names
+
+
+def assign_splits(frame_counts: Dict[str, int], fractions: Dict[str, float],
+                  seed: int = 0) -> Dict[str, str]:
+    """Assign whole videos to splits so each split gets about its fraction of frames.
+
+    *frame_counts* maps video name → number of frames to export; *fractions*
+    maps split name → fraction (splits with fraction 0 are left out).  Every
+    split with a positive fraction gets at least one video.
+    """
+    splits = [s for s in SPLITS if fractions.get(s, 0) > 0]
+    videos = [v for v, n in frame_counts.items() if n > 0]
+    if len(videos) < len(splits):
+        raise ValueError(
+            f"Need at least {len(splits)} labeled videos to split into {'/'.join(splits)} "
+            f"(found {len(videos)}). Splits are by video, so frames from one fly never "
+            "land in both train and val — label frames from more videos."
+        )
+    total = sum(frame_counts[v] for v in videos)
+    targets = {s: fractions[s] / sum(fractions[s2] for s2 in splits) * total for s in splits}
+    rng = random.Random(seed)
+    order = sorted(videos)
+    rng.shuffle(order)
+    order.sort(key=lambda v: -frame_counts[v])   # stable: ties keep the shuffled order
+
+    assigned: Dict[str, str] = {}
+    filled = {s: 0 for s in splits}
+    for v in order:
+        best = max(splits, key=lambda s: (targets[s] - filled[s]) / targets[s])
+        assigned[v] = best
+        filled[best] += frame_counts[v]
+
+    # Guarantee every split has a video: move the smallest video out of the
+    # split that holds the most videos.
+    for s in splits:
+        if s in assigned.values():
+            continue
+        donor = max((d for d in splits if d != s),
+                    key=lambda d: sum(1 for x in assigned.values() if x == d))
+        smallest = min((v for v, sp in assigned.items() if sp == donor), key=lambda v: frame_counts[v])
+        assigned[smallest] = s
+    return assigned
+
+
 # ---------------------------------------------------------------------------
 # Existing dataset
 # ---------------------------------------------------------------------------
@@ -258,6 +328,7 @@ class ExportResult:
     exported: Counter = field(default_factory=Counter)   # (split, class name) → count
     skipped: Counter = field(default_factory=Counter)    # reason → count
     out_dir: Optional[Path] = None
+    video_splits: Dict[str, str] = field(default_factory=dict)  # video name → split (new splits)
 
     @property
     def total_exported(self) -> int:
@@ -272,13 +343,17 @@ def export_dataset(
     heatmap: Optional[bool] = None,
     classes: Optional[Sequence[str]] = None,
     match_dataset: Optional[ExistingDataset] = None,
+    split: Optional[Sequence[float]] = None,
+    seed: int = 0,
     dry_run: bool = False,
     progress: Optional[Callable[[str], None]] = None,
 ) -> ExportResult:
     """Write images + YOLO labels for *videos* into *out_dir* (see module docstring).
 
     *classes* limits the export to those class names or keys.  *heatmap*
-    defaults to the project's ``export.heatmap`` setting.
+    defaults to the project's ``export.heatmap`` setting.  *split* is
+    ``(train, val, test)`` fractions for a new video-grouped split (see the
+    module docstring); it can't be combined with *match_dataset*.
     """
     heatmap = project.export_heatmap if heatmap is None else heatmap
     out_dir = Path(out_dir)
@@ -294,6 +369,17 @@ def export_dataset(
             if idx is None:
                 raise ValueError(f"Unknown class '{c}'. Project classes: {', '.join(project.names)}")
             wanted.add(project.classes[idx].key)
+
+    fractions: Optional[Dict[str, float]] = None
+    if split is not None:
+        if match_dataset is not None:
+            raise ValueError("Use either a new split or --match-dataset, not both.")
+        vals = list(split) + [0.0] * (3 - len(split))
+        if len(vals) != 3 or any(f < 0 for f in vals) or vals[0] <= 0 or vals[1] <= 0:
+            raise ValueError("Split needs positive train and val fractions (test is optional).")
+        if abs(sum(vals) - 1.0) > 1e-6:
+            raise ValueError(f"Split fractions must add up to 1 (got {sum(vals):g}).")
+        fractions = dict(zip(SPLITS, vals))
 
     if match_dataset is not None:
         match_dataset.check_classes(project)
@@ -311,12 +397,31 @@ def export_dataset(
 
     result = ExportResult(out_dir=out_dir)
     manifest_rows: List[dict] = []
+    names = unique_stems(videos)
+    label_files = {lv.video: read_labels(lv.labels) for lv in videos}
+
+    video_splits: Dict[str, str] = {}
+    if fractions is not None:
+        counts = {
+            names[lv.video]: sum(
+                1 for frame, lab in label_files[lv.video].labels.items()
+                if project.index_of(lab.cls) is not None
+                and (wanted is None or lab.cls in wanted)
+                and not (heatmap and frame < 1)
+            )
+            for lv in videos
+        }
+        video_splits = assign_splits(counts, fractions, seed)
+    result.video_splits = video_splits
 
     for lv in videos:
-        label_file = read_labels(lv.labels)
+        label_file = label_files[lv.video]
+        name = names[lv.video]
         split = ""
         if match_dataset is not None:
-            split = match_dataset.video_splits.get(lv.video.stem, UNASSIGNED)
+            split = match_dataset.video_splits.get(name, UNASSIGNED)
+        elif fractions is not None:
+            split = video_splits.get(name, "")   # "" only if nothing is exportable
 
         jobs = []
         for frame, lab in sorted(label_file.labels.items()):
@@ -331,9 +436,9 @@ def export_dataset(
             elif heatmap and frame < 1:
                 row["status"] = "skipped: no earlier frames for heatmap"
             else:
-                stem = image_stem(lv.video.stem, project.classes[idx].name, frame, heatmap)
+                stem = image_stem(name, project.classes[idx].name, frame, heatmap)
                 row["image"] = f"{stem}.jpg"
-                in_dataset = (match_dataset.frames.get((lv.video.stem, frame))
+                in_dataset = (match_dataset.frames.get((name, frame))
                               if match_dataset is not None else None)
                 if in_dataset is None:
                     jobs.append((frame, idx, lab.bbox, stem, row))
@@ -380,7 +485,13 @@ def export_dataset(
             reader.close()
 
     if not dry_run:
-        _write_data_yaml(out_dir / "data.yaml", project, split_layout=match_dataset is not None)
+        if match_dataset is not None:
+            layout = list(SPLITS)
+        elif fractions is not None:
+            layout = [s for s in SPLITS if fractions[s] > 0]
+        else:
+            layout = []
+        _write_data_yaml(out_dir / "data.yaml", project, layout)
         with open(out_dir / "manifest.csv", "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=["video", "frame", "class", "split", "image", "status"])
             writer.writeheader()
@@ -393,10 +504,12 @@ def _skip(row: dict, result: ExportResult, reason: str) -> None:
     result.skipped[reason] += 1
 
 
-def _write_data_yaml(path: Path, project: Project, split_layout: bool) -> None:
-    lines = ["# Written by trackviz export-dataset", "path: .",]
-    if split_layout:
-        lines += ["train: train/images", "val: val/images", "test: test/images"]
+def _write_data_yaml(path: Path, project: Project, splits: Sequence[str]) -> None:
+    # No ``path:`` key: ultralytics then resolves the image folders relative to
+    # this file, so training works from any working directory.
+    lines = ["# Written by trackviz export-dataset"]
+    if splits:
+        lines += [f"{s}: {s}/images" for s in splits]
     else:
         lines += ["train: images", "val: images"]
     lines += [f"nc: {len(project.classes)}", "names:"]

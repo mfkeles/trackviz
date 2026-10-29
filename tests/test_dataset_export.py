@@ -8,6 +8,7 @@ from trackviz.io.labels import Label, LabelFile, write_labels
 from trackviz.io.project import project_from_dict
 from trackviz.render.dataset import (
     ExistingDataset,
+    assign_splits,
     export_dataset,
     find_labeled_videos,
     motion_heatmap,
@@ -161,3 +162,82 @@ def test_match_dataset_safety_checks(tmp_path):
 def test_video_in_two_splits_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="more than one split"):
         _dataset(tmp_path / "ds", [("train", "v_Grooming_1_heatmap"), ("val", "v_Grooming_2_heatmap")])
+
+
+# ---------------------------------------------------------------------------
+# --split
+# ---------------------------------------------------------------------------
+
+def _box():
+    return [1, 1, 5, 5]
+
+
+def test_split_keeps_each_video_in_one_split(tmp_path):
+    project = _project(["Regurgitation"])
+    sizes = {"fly01": 6, "fly02": 4, "fly03": 3, "fly04": 2, "fly05": 2}
+    for name, n in sizes.items():
+        _labeled(tmp_path, project,
+                 {f: Label("regurgitation" if f % 2 else "grooming", _box()) for f in range(1, n + 1)},
+                 name=name)
+    videos, _ = find_labeled_videos(project, [tmp_path])
+    out = tmp_path / "out"
+    res = export_dataset(project, videos, out, split=[0.8, 0.2])
+
+    assert set(res.video_splits) == set(sizes)
+    assert set(res.video_splits.values()) == {"train", "val"}
+    for split in ("train", "val"):
+        stems = {p.name.split("_")[0] for p in (out / split / "images").iterdir()}
+        assert stems == {v for v, s in res.video_splits.items() if s == split}
+    assert not (out / "images").exists() and not (out / "test").exists()
+    text = (out / "data.yaml").read_text()
+    assert "train: train/images" in text and "val: val/images" in text
+    assert "test:" not in text and "path:" not in text
+    assert res.total_exported == sum(sizes.values())
+    # Deterministic for a seed.
+    again = export_dataset(project, videos, tmp_path / "again", split=[0.8, 0.2], dry_run=True)
+    assert again.video_splits == res.video_splits
+
+
+def test_split_with_test_and_validation(tmp_path):
+    project = _project()
+    for i in range(3):
+        _labeled(tmp_path, project, {1: Label("grooming", _box())}, name=f"fly0{i}")
+    videos, _ = find_labeled_videos(project, [tmp_path])
+    res = export_dataset(project, videos, tmp_path / "out", split=[0.7, 0.15, 0.15])
+    assert sorted(res.video_splits.values()) == ["test", "train", "val"]
+    assert "test: test/images" in (tmp_path / "out" / "data.yaml").read_text()
+
+    with pytest.raises(ValueError, match="add up to 1"):
+        export_dataset(project, videos, tmp_path / "bad", split=[0.8, 0.1])
+    with pytest.raises(ValueError, match="positive train and val"):
+        export_dataset(project, videos, tmp_path / "bad", split=[1.0])
+    ds = _dataset(tmp_path / "ds", [("train", "x_Grooming_1_heatmap")])
+    with pytest.raises(ValueError, match="not both"):
+        export_dataset(project, videos, tmp_path / "bad", split=[0.8, 0.2], match_dataset=ds)
+
+
+def test_split_needs_a_video_per_split(tmp_path):
+    project = _project()
+    _labeled(tmp_path, project, {1: Label("grooming", _box()), 2: Label("feeding", _box())})
+    videos, _ = find_labeled_videos(project, [tmp_path])
+    with pytest.raises(ValueError, match="at least 2 labeled videos"):
+        export_dataset(project, videos, tmp_path / "out", split=[0.8, 0.2])
+
+
+def test_assign_splits_fills_every_split():
+    assert assign_splits({"a": 500, "b": 10}, {"train": 0.8, "val": 0.2}) == {"a": "train", "b": "val"}
+    got = assign_splits({"a": 100, "b": 90, "c": 80}, {"train": 0.7, "val": 0.15, "test": 0.15})
+    assert sorted(got.values()) == ["test", "train", "val"]
+
+
+def test_same_video_names_get_folder_prefix(tmp_path):
+    project = _project()
+    for session in ("20260317", "20260402"):
+        (tmp_path / session).mkdir()
+        _labeled(tmp_path / session, project, {3: Label("grooming", _box())}, name="raw")
+    videos, _ = find_labeled_videos(project, [tmp_path])
+    out = tmp_path / "out"
+    res = export_dataset(project, videos, out, split=[0.5, 0.5])
+    assert sorted(res.video_splits) == ["20260317_raw", "20260402_raw"]
+    names = sorted(p.name for s in ("train", "val") for p in (out / s / "images").iterdir())
+    assert names == ["20260317_raw_Grooming_3_heatmap.jpg", "20260402_raw_Grooming_3_heatmap.jpg"]
